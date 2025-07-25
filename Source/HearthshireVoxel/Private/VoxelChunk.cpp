@@ -26,6 +26,7 @@ UVoxelChunkComponent::UVoxelChunkComponent()
     OwnerWorld = nullptr;
     bIsGeneratingMesh = false;
     WorldPosition = FVector::ZeroVector;
+    bHasBeenGenerated = false;
     
     // Initialize with default chunk size for editor-placed actors
     ChunkData.ChunkSize = FVoxelChunkSize(32); // Default 32x32x32
@@ -174,6 +175,34 @@ void UVoxelChunkComponent::Initialize(const FIntVector& InChunkPosition, const F
     if (AActor* Owner = GetOwner())
     {
         Owner->SetActorLocation(WorldPosition);
+        
+        // Ensure ProceduralMesh component exists for immediate use
+        if (!ProceduralMesh)
+        {
+            ProceduralMesh = Owner->FindComponentByClass<UProceduralMeshComponent>();
+            if (!ProceduralMesh)
+            {
+                ProceduralMesh = NewObject<UProceduralMeshComponent>(Owner, TEXT("ProceduralMesh"));
+                ProceduralMesh->RegisterComponent();
+                Owner->AddInstanceComponent(ProceduralMesh);
+                ProceduralMesh->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+                
+                // Configure ProceduralMesh for opaque voxel rendering
+                ProceduralMesh->bUseAsyncCooking = true;
+                ProceduralMesh->bUseComplexAsSimpleCollision = false;
+                ProceduralMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+                ProceduralMesh->SetCollisionResponseToAllChannels(ECR_Block);
+                ProceduralMesh->SetCastShadow(true);
+                ProceduralMesh->bRenderCustomDepth = false;
+                ProceduralMesh->bRenderInMainPass = true;
+                ProceduralMesh->SetReceivesDecals(true);
+                ProceduralMesh->bVisibleInReflectionCaptures = true;
+                ProceduralMesh->bVisibleInRealTimeSkyCaptures = true;
+                ProceduralMesh->bVisibleInRayTracing = true;
+                
+                UE_LOG(LogHearthshireVoxel, Log, TEXT("Initialize: Created ProceduralMesh component"));
+            }
+        }
     }
     
     ChunkState = EVoxelChunkState::Generating;
@@ -220,11 +249,60 @@ void UVoxelChunkComponent::SetVoxelBatch(const TArray<FIntVector>& Positions, co
     }
 }
 
+void UVoxelChunkComponent::SetChunkData(const FVoxelChunkData& NewChunkData)
+{
+    // Validate input data
+    if (NewChunkData.Voxels.Num() != NewChunkData.ChunkSize.GetVoxelCount())
+    {
+        UE_LOG(LogHearthshireVoxel, Error, TEXT("SetChunkData: Invalid voxel data size. Expected %d, got %d"),
+            NewChunkData.ChunkSize.GetVoxelCount(), NewChunkData.Voxels.Num());
+        return;
+    }
+    
+    // Store the new chunk data
+    ChunkData = NewChunkData;
+    
+    // Mark as generated since we're setting data manually
+    bHasBeenGenerated = true;
+    
+    // Mark as dirty to trigger mesh regeneration
+    ChunkData.bIsDirty = true;
+    
+    // Update world position based on chunk position
+    WorldPosition = FVector(
+        ChunkData.ChunkPosition.X * ChunkData.ChunkSize.X * VoxelSize,
+        ChunkData.ChunkPosition.Y * ChunkData.ChunkSize.Y * VoxelSize,
+        ChunkData.ChunkPosition.Z * ChunkData.ChunkSize.Z * VoxelSize
+    );
+    
+    if (AActor* Owner = GetOwner())
+    {
+        Owner->SetActorLocation(WorldPosition);
+    }
+    
+    // Update state
+    ChunkState = EVoxelChunkState::Generated;
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("SetChunkData: Loaded chunk data at position %s with %d voxels"),
+        *ChunkData.ChunkPosition.ToString(), ChunkData.Voxels.Num());
+}
+
 void UVoxelChunkComponent::GenerateMesh(bool bAsync)
 {
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== GENERATING MESH for chunk %s, HasBeenGenerated=%d, State=%d ==="), 
+        *ChunkData.ChunkPosition.ToString(), bHasBeenGenerated ? 1 : 0, (int32)ChunkState);
+    
     if (bIsGeneratingMesh)
     {
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Chunk already generating mesh"));
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Chunk %s already generating mesh, skipping"), *ChunkData.ChunkPosition.ToString());
+        return;
+    }
+    
+    // Skip if already has mesh and marked as generated
+    if (bHasBeenGenerated && ChunkState == EVoxelChunkState::Ready && MeshData.VertexCount > 0)
+    {
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Chunk %s already has generated mesh with %d vertices, skipping regeneration"), 
+            *ChunkData.ChunkPosition.ToString(), MeshData.VertexCount);
         return;
     }
     
@@ -237,8 +315,6 @@ void UVoxelChunkComponent::GenerateMesh(bool bAsync)
     
     // Count solid voxels for debugging
     int32 SolidVoxelCount = GetVoxelCount();
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateMesh: Starting mesh generation - Solid voxels: %d, LOD: %d"),
-        SolidVoxelCount, (int32)CurrentLOD);
     
     ChunkState = EVoxelChunkState::Meshing;
     
@@ -371,8 +447,6 @@ void UVoxelChunkComponent::ApplyMeshData()
         return;
     }
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshData: Applying mesh with %d vertices, %d triangles"),
-        MeshData.VertexCount, MeshData.TriangleCount);
     
     // Critical validation - check for invalid triangle indices
     bool bHasInvalidIndices = false;
@@ -413,8 +487,6 @@ void UVoxelChunkComponent::ApplyMeshData()
         MeshBounds += Vertex;
     }
     
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Mesh bounds before apply: Min=%s, Max=%s, Size=%s"), 
-        *MeshBounds.Min.ToString(), *MeshBounds.Max.ToString(), *MeshBounds.GetSize().ToString());
     
     // Expected bounds for chunk with VoxelSize
     float ExpectedSize = FMath::Max(ChunkData.ChunkSize.X, FMath::Max(ChunkData.ChunkSize.Y, ChunkData.ChunkSize.Z)) * VoxelSize;
@@ -441,7 +513,6 @@ void UVoxelChunkComponent::ApplyMeshData()
     OnChunkGenerated.Broadcast(this);
     OnGenerationCompleted.Broadcast(LastGenerationTimeMs);
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshData: Mesh generation completed successfully"));
 }
 
 void UVoxelChunkComponent::GenerateLOD0Mesh()
@@ -450,7 +521,6 @@ void UVoxelChunkComponent::GenerateLOD0Mesh()
     
     MeshData.Clear();
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateLOD0Mesh: Starting LOD0 mesh generation"));
     
     // Use configuration settings
     FVoxelMeshGenerator::FGenerationConfig Config;
@@ -478,17 +548,228 @@ void UVoxelChunkComponent::GenerateLOD0Mesh()
 
 void UVoxelChunkComponent::GenerateLOD1Mesh()
 {
-    // TODO: Implement 50cm equivalent mesh
+    // LOD1: Downsample to 50cm voxels (2x2x2 blocks)
+    const int32 BlockSize = 2;
+    const FVoxelChunkSize& OriginalSize = ChunkData.ChunkSize;
+    const int32 LODSizeX = OriginalSize.X / BlockSize;
+    const int32 LODSizeY = OriginalSize.Y / BlockSize;
+    const int32 LODSizeZ = OriginalSize.Z / BlockSize;
+    
+    // Create temporary downsampled voxel data
+    TArray<EVoxelMaterial> LODVoxels;
+    LODVoxels.SetNum(LODSizeX * LODSizeY * LODSizeZ);
+    
+    // Downsample voxels by taking the most common material in each 2x2x2 block
+    for (int32 LODz = 0; LODz < LODSizeZ; LODz++)
+    {
+        for (int32 LODy = 0; LODy < LODSizeY; LODy++)
+        {
+            for (int32 LODx = 0; LODx < LODSizeX; LODx++)
+            {
+                // Sample the 2x2x2 block
+                TMap<EVoxelMaterial, int32> MaterialCounts;
+                
+                for (int32 bz = 0; bz < BlockSize; bz++)
+                {
+                    for (int32 by = 0; by < BlockSize; by++)
+                    {
+                        for (int32 bx = 0; bx < BlockSize; bx++)
+                        {
+                            int32 OrigX = LODx * BlockSize + bx;
+                            int32 OrigY = LODy * BlockSize + by;
+                            int32 OrigZ = LODz * BlockSize + bz;
+                            
+                            if (OrigX < OriginalSize.X && OrigY < OriginalSize.Y && OrigZ < OriginalSize.Z)
+                            {
+                                EVoxelMaterial Mat = GetVoxel(OrigX, OrigY, OrigZ);
+                                MaterialCounts.FindOrAdd(Mat)++;
+                            }
+                        }
+                    }
+                }
+                
+                // Find the most common material
+                EVoxelMaterial MostCommon = EVoxelMaterial::Air;
+                int32 MaxCount = 0;
+                for (const auto& Pair : MaterialCounts)
+                {
+                    if (Pair.Value > MaxCount && Pair.Key != EVoxelMaterial::Air)
+                    {
+                        MaxCount = Pair.Value;
+                        MostCommon = Pair.Key;
+                    }
+                }
+                
+                LODVoxels[LODx + LODy * LODSizeX + LODz * LODSizeX * LODSizeY] = MostCommon;
+            }
+        }
+    }
+    
+    // Generate mesh using greedy mesher with LOD data
+    FVoxelMeshData LODMeshData;
+    FVoxelGreedyMesher::GenerateGreedyMeshFromData(
+        LODVoxels,
+        FVoxelChunkSize(LODSizeX, LODSizeY, LODSizeZ),
+        VoxelSize * BlockSize, // Double the voxel size
+        LODMeshData
+    );
+    
+    // Apply the mesh
+    MeshData = LODMeshData;
+    ApplyMeshData();
 }
 
 void UVoxelChunkComponent::GenerateLOD2Mesh()
 {
-    // TODO: Implement 1m equivalent mesh
+    // LOD2: Downsample to 1m voxels (4x4x4 blocks)
+    const int32 BlockSize = 4;
+    const FVoxelChunkSize& OriginalSize = ChunkData.ChunkSize;
+    const int32 LODSizeX = OriginalSize.X / BlockSize;
+    const int32 LODSizeY = OriginalSize.Y / BlockSize;
+    const int32 LODSizeZ = OriginalSize.Z / BlockSize;
+    
+    // Create temporary downsampled voxel data
+    TArray<EVoxelMaterial> LODVoxels;
+    LODVoxels.SetNum(LODSizeX * LODSizeY * LODSizeZ);
+    
+    // Downsample voxels by taking the most common material in each 4x4x4 block
+    for (int32 LODz = 0; LODz < LODSizeZ; LODz++)
+    {
+        for (int32 LODy = 0; LODy < LODSizeY; LODy++)
+        {
+            for (int32 LODx = 0; LODx < LODSizeX; LODx++)
+            {
+                // Sample the 4x4x4 block
+                TMap<EVoxelMaterial, int32> MaterialCounts;
+                
+                for (int32 bz = 0; bz < BlockSize; bz++)
+                {
+                    for (int32 by = 0; by < BlockSize; by++)
+                    {
+                        for (int32 bx = 0; bx < BlockSize; bx++)
+                        {
+                            int32 OrigX = LODx * BlockSize + bx;
+                            int32 OrigY = LODy * BlockSize + by;
+                            int32 OrigZ = LODz * BlockSize + bz;
+                            
+                            if (OrigX < OriginalSize.X && OrigY < OriginalSize.Y && OrigZ < OriginalSize.Z)
+                            {
+                                EVoxelMaterial Mat = GetVoxel(OrigX, OrigY, OrigZ);
+                                MaterialCounts.FindOrAdd(Mat)++;
+                            }
+                        }
+                    }
+                }
+                
+                // Find the most common material
+                EVoxelMaterial MostCommon = EVoxelMaterial::Air;
+                int32 MaxCount = 0;
+                for (const auto& Pair : MaterialCounts)
+                {
+                    if (Pair.Value > MaxCount && Pair.Key != EVoxelMaterial::Air)
+                    {
+                        MaxCount = Pair.Value;
+                        MostCommon = Pair.Key;
+                    }
+                }
+                
+                LODVoxels[LODx + LODy * LODSizeX + LODz * LODSizeX * LODSizeY] = MostCommon;
+            }
+        }
+    }
+    
+    // Generate mesh using greedy mesher with LOD data
+    FVoxelMeshData LODMeshData;
+    FVoxelGreedyMesher::GenerateGreedyMeshFromData(
+        LODVoxels,
+        FVoxelChunkSize(LODSizeX, LODSizeY, LODSizeZ),
+        VoxelSize * BlockSize, // 4x the voxel size
+        LODMeshData
+    );
+    
+    // Apply the mesh
+    MeshData = LODMeshData;
+    ApplyMeshData();
 }
 
 void UVoxelChunkComponent::GenerateLOD3Mesh()
 {
-    // TODO: Implement billboard/impostor mesh
+    // LOD3: Billboard representation - single quad facing camera
+    FVoxelMeshData BillboardMesh;
+    
+    // Calculate chunk bounds to determine billboard size
+    FBox ChunkBounds = GetWorldBounds();
+    FVector ChunkCenter = ChunkBounds.GetCenter();
+    FVector ChunkExtent = ChunkBounds.GetExtent();
+    
+    // Create a simple colored quad based on dominant material
+    TMap<EVoxelMaterial, int32> MaterialCounts;
+    
+    // Sample voxels to find dominant color
+    for (int32 Z = 0; Z < ChunkData.ChunkSize.Z; Z += 4)
+    {
+        for (int32 Y = 0; Y < ChunkData.ChunkSize.Y; Y += 4)
+        {
+            for (int32 X = 0; X < ChunkData.ChunkSize.X; X += 4)
+            {
+                EVoxelMaterial Mat = GetVoxel(X, Y, Z);
+                if (Mat != EVoxelMaterial::Air)
+                {
+                    MaterialCounts.FindOrAdd(Mat)++;
+                }
+            }
+        }
+    }
+    
+    // Find dominant material
+    EVoxelMaterial DominantMaterial = EVoxelMaterial::Stone;
+    int32 MaxCount = 0;
+    for (const auto& Pair : MaterialCounts)
+    {
+        if (Pair.Value > MaxCount)
+        {
+            MaxCount = Pair.Value;
+            DominantMaterial = Pair.Key;
+        }
+    }
+    
+    // Create billboard quad
+    float Width = FMath::Max(ChunkExtent.X, ChunkExtent.Y) * 2.0f;
+    float Height = ChunkExtent.Z * 2.0f;
+    
+    // Add vertices for a simple quad
+    BillboardMesh.Vertices.Add(FVector(-Width/2, 0, -Height/2));
+    BillboardMesh.Vertices.Add(FVector(Width/2, 0, -Height/2));
+    BillboardMesh.Vertices.Add(FVector(Width/2, 0, Height/2));
+    BillboardMesh.Vertices.Add(FVector(-Width/2, 0, Height/2));
+    
+    // Add UVs
+    BillboardMesh.UV0.Add(FVector2D(0, 1));
+    BillboardMesh.UV0.Add(FVector2D(1, 1));
+    BillboardMesh.UV0.Add(FVector2D(1, 0));
+    BillboardMesh.UV0.Add(FVector2D(0, 0));
+    
+    // Add normals (facing camera)
+    for (int32 i = 0; i < 4; i++)
+    {
+        BillboardMesh.Normals.Add(FVector(0, 1, 0));
+    }
+    
+    // Add triangles
+    BillboardMesh.Triangles.Add(0);
+    BillboardMesh.Triangles.Add(1);
+    BillboardMesh.Triangles.Add(2);
+    
+    BillboardMesh.Triangles.Add(0);
+    BillboardMesh.Triangles.Add(2);
+    BillboardMesh.Triangles.Add(3);
+    
+    // Set material section
+    BillboardMesh.MaterialSections.Add(DominantMaterial, 0);
+    
+    // Apply the billboard mesh
+    MeshData = BillboardMesh;
+    ApplyMeshData();
 }
 
 void UVoxelChunkComponent::UpdatePerformanceStats()
@@ -509,63 +790,6 @@ void UVoxelChunkComponent::UpdatePerformanceStats()
     TriangleReductionPercentage = GetTriangleReductionPercentage();
     bIsCurrentlyGenerating = bIsGeneratingMesh;
     
-    // Comprehensive mesh validation and debugging
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== VOXEL MESH GENERATION DEBUG ==="));
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Chunk Size: %dx%dx%d"), ChunkData.ChunkSize.X, ChunkData.ChunkSize.Y, ChunkData.ChunkSize.Z);
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Total Voxels: %d"), ChunkData.Voxels.Num());
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Solid Voxels: %d"), GetVoxelCount());
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Vertices Generated: %d"), RuntimeVertexCount);
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Triangles: %d"), RuntimeTriangleCount);
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Material Sections: %d"), MeshData.MaterialSections.Num());
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Generation Time: %.2fms"), LastGenerationTimeMs);
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Triangle Reduction: %.1f%%"), TriangleReductionPercentage);
-    
-    // Validate vertex colors
-    int32 TransparentVertices = 0;
-    for (const FColor& Color : MeshData.VertexColors)
-    {
-        if (Color.A < 255)
-        {
-            TransparentVertices++;
-        }
-    }
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Vertex Colors: %d total, %d transparent (A < 255)"), 
-        MeshData.VertexColors.Num(), TransparentVertices);
-    
-    // Log material sections
-    for (const auto& MaterialSection : MeshData.MaterialSections)
-    {
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Material %d (Section %d)"), 
-            (int32)MaterialSection.Key, MaterialSection.Value);
-    }
-    
-    // Verify ProceduralMesh component bounds
-    if (ProceduralMesh)
-    {
-        FBoxSphereBounds Bounds = ProceduralMesh->Bounds;
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Mesh Bounds: Center=(%s), Extent=(%s), Radius=%.2f"), 
-            *Bounds.Origin.ToString(), *Bounds.BoxExtent.ToString(), Bounds.SphereRadius);
-        
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("ProceduralMesh Settings:"));
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("  CastShadow: %s"), ProceduralMesh->CastShadow ? TEXT("True") : TEXT("False"));
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("  RenderInMainPass: %s"), ProceduralMesh->bRenderInMainPass ? TEXT("True") : TEXT("False"));
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Collision Enabled: %d"), (int32)ProceduralMesh->GetCollisionEnabled());
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Num Sections: %d"), ProceduralMesh->GetNumSections());
-        
-        // Check material assignments
-        for (int32 i = 0; i < ProceduralMesh->GetNumSections(); i++)
-        {
-            UMaterialInterface* Material = ProceduralMesh->GetMaterial(i);
-            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Section %d Material: %s"), 
-                i, Material ? *Material->GetName() : TEXT("NULL"));
-        }
-    }
-    else
-    {
-        UE_LOG(LogHearthshireVoxel, Error, TEXT("ProceduralMesh component is NULL!"));
-    }
-    
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== END VOXEL MESH DEBUG ==="));
 }
 
 #if WITH_EDITOR
@@ -1367,6 +1591,12 @@ void AVoxelChunk::InitializeChunk(const FIntVector& ChunkPosition, const FVoxelC
     if (ChunkComponent)
     {
         ChunkComponent->Initialize(ChunkPosition, ChunkSize);
+        
+        // Pass material set from world to chunk
+        if (World && World->Config.MaterialSet)
+        {
+            ChunkComponent->SetMaterialSet(World->Config.MaterialSet);
+        }
     }
 }
 

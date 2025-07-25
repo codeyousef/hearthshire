@@ -15,8 +15,6 @@ void FVoxelGreedyMesher::GenerateGreedyMesh(
     
     OutQuads.Empty();
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateGreedyMesh: Starting greedy mesh generation for chunk %s"),
-        *ChunkData.ChunkPosition.ToString());
     
     // Count visible faces before optimization
     int32 VisibleFaceCount = 0;
@@ -32,7 +30,13 @@ void FVoxelGreedyMesher::GenerateGreedyMesh(
         UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("  Face %d: Generated %d quads"), FaceIndex, QuadsAdded);
     }
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateGreedyMesh: Generated %d greedy quads"), OutQuads.Num());
+    // Count faces by type for debugging
+    int32 FaceCounts[6] = {0};
+    for (const FGreedyQuad& Quad : OutQuads)
+    {
+        FaceCounts[(int32)Quad.Face]++;
+    }
+    
 }
 
 void FVoxelGreedyMesher::ProcessFaceDirection(
@@ -378,8 +382,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
     // Vertex deduplication map: Position -> Vertex Index
     TMap<FVertexKey, int32> VertexMap;
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("=== ConvertQuadsToMesh START ==="));
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("Converting %d greedy quads to mesh with vertex welding"), Quads.Num());
     
     // Reserve approximate space (assuming ~25% vertex sharing)
     const int32 EstimatedVertices = FMath::Max(Quads.Num(), 100);
@@ -391,15 +393,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
     
     for (const FGreedyQuad& Quad : Quads)
     {
-        // Log first few quads in detail
-        if (QuadIndex < 5)
-        {
-            UE_LOG(LogHearthshireVoxel, Warning, TEXT("Quad %d: Pos(%d,%d,%d), Size(%d,%d,%d), Face:%d, Material:%d"),
-                QuadIndex,
-                Quad.Position.X, Quad.Position.Y, Quad.Position.Z,
-                Quad.Size.X, Quad.Size.Y, Quad.Size.Z,
-                (int32)Quad.Face, (int32)Quad.Material);
-        }
         
         // Calculate base position in world units
         const FVector BasePos = FVector(Quad.Position) * VoxelSize;
@@ -466,14 +459,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
         }
         
         // Check for unreasonable vertex positions
-        if (QuadIndex < 5)
-        {
-            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Calculated vertices:"));
-            for (int32 i = 0; i < 4; i++)
-            {
-                UE_LOG(LogHearthshireVoxel, Warning, TEXT("    V%d: %s"), i, *Vertices[i].ToString());
-            }
-        }
         
         // Validate vertex positions are reasonable
         for (int32 i = 0; i < 4; i++)
@@ -527,12 +512,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
                 VertexIndices[i] = NewIndex;
                 VertexMap.Add(Key, NewIndex);
                 
-                // Log vertex positions for first few quads
-                if (QuadIndex < 5)
-                {
-                    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Vertex %d (Index %d): %s"), 
-                        i, NewIndex, *Vertices[i].ToString());
-                }
                 
                 // Add vertex data
                 OutMeshData.Vertices.Add(Vertices[i]);
@@ -576,14 +555,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
             }
         }
         
-        // Log triangle indices for first few quads
-        if (QuadIndex < 5)
-        {
-            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Triangle 1: %d, %d, %d"), 
-                VertexIndices[0], VertexIndices[1], VertexIndices[2]);
-            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Triangle 2: %d, %d, %d"), 
-                VertexIndices[0], VertexIndices[2], VertexIndices[3]);
-        }
         
         // Validate indices before adding
         int32 MaxIndex = OutMeshData.Vertices.Num();
@@ -597,15 +568,53 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
         }
         
         // Add triangles with correct winding order
-        // First triangle: 0-1-2
-        OutMeshData.Triangles.Add(VertexIndices[0]);
-        OutMeshData.Triangles.Add(VertexIndices[1]);
-        OutMeshData.Triangles.Add(VertexIndices[2]);
+        // UE5 uses clockwise winding for front faces when viewed from outside
         
-        // Second triangle: 0-2-3
-        OutMeshData.Triangles.Add(VertexIndices[0]);
-        OutMeshData.Triangles.Add(VertexIndices[2]);
-        OutMeshData.Triangles.Add(VertexIndices[3]);
+        // Debug logging for top faces
+        if (Quad.Face == EVoxelFace::Top && QuadIndex < 3)
+        {
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("TOP FACE DEBUG - Quad %d:"), QuadIndex);
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Normal: %s"), *Normal.ToString());
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  V0[%d]: %s"), VertexIndices[0], *OutMeshData.Vertices[VertexIndices[0]].ToString());
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  V1[%d]: %s"), VertexIndices[1], *OutMeshData.Vertices[VertexIndices[1]].ToString());
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  V2[%d]: %s"), VertexIndices[2], *OutMeshData.Vertices[VertexIndices[2]].ToString());
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  V3[%d]: %s"), VertexIndices[3], *OutMeshData.Vertices[VertexIndices[3]].ToString());
+        }
+        
+        // Check if this is a top face (Face 4) which needs special winding
+        if (Quad.Face == EVoxelFace::Top) // Face 4 = +Z
+        {
+            // For top faces viewed from above (+Z looking down)
+            // Vertices are ordered: (0,0,Z), (X,0,Z), (X,Y,Z), (0,Y,Z)
+            // We need counter-clockwise when viewed from above (which is clockwise from below)
+            // First triangle: 0-3-1 (reversed from normal)
+            OutMeshData.Triangles.Add(VertexIndices[0]);
+            OutMeshData.Triangles.Add(VertexIndices[3]);
+            OutMeshData.Triangles.Add(VertexIndices[1]);
+            
+            // Second triangle: 1-3-2 (reversed from normal)
+            OutMeshData.Triangles.Add(VertexIndices[1]);
+            OutMeshData.Triangles.Add(VertexIndices[3]);
+            OutMeshData.Triangles.Add(VertexIndices[2]);
+            
+            if (QuadIndex < 3)
+            {
+                UE_LOG(LogHearthshireVoxel, Warning, TEXT("  TOP FACE: Using reversed winding (0-3-1, 1-3-2)"));
+            }
+        }
+        else
+        {
+            // Normal winding order for all other faces
+            // First triangle: 0-1-2
+            OutMeshData.Triangles.Add(VertexIndices[0]);
+            OutMeshData.Triangles.Add(VertexIndices[1]);
+            OutMeshData.Triangles.Add(VertexIndices[2]);
+            
+            // Second triangle: 0-2-3
+            OutMeshData.Triangles.Add(VertexIndices[0]);
+            OutMeshData.Triangles.Add(VertexIndices[2]);
+            OutMeshData.Triangles.Add(VertexIndices[3]);
+        }
         
         // Add material section mapping
         int32 SectionIndex = FVoxelMeshGenerator::GetOrCreateMaterialSection(OutMeshData, Quad.Material);
@@ -617,12 +626,8 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
     OutMeshData.TriangleCount = OutMeshData.Triangles.Num() / 3;
     OutMeshData.VertexCount = OutMeshData.Vertices.Num();
     
-    // CRITICAL DEBUG: Log the actual counts
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("ConvertQuadsToMesh FINAL: Triangles array size: %d, TriangleCount: %d, VertexCount: %d"),
-        OutMeshData.Triangles.Num(), OutMeshData.TriangleCount, OutMeshData.VertexCount);
     
     // Validate all triangle indices
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("Validating triangle indices..."));
     int32 InvalidIndexCount = 0;
     for (int32 i = 0; i < OutMeshData.Triangles.Num(); i++)
     {
@@ -640,7 +645,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
     }
     
     // Check for vertex position outliers
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("Checking vertex positions for outliers..."));
     float MaxReasonableDistance = 1000.0f * VoxelSize; // 1000 voxels max distance
     int32 OutlierCount = 0;
     
@@ -669,12 +673,6 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
     float VerticesPerQuad = OutMeshData.Vertices.Num() > 0 ? 
         (float)OutMeshData.Vertices.Num() / (float)Quads.Num() : 0.0f;
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("ConvertQuadsToMesh: Created %d unique vertices from %d quads (%.2f vertices/quad)"), 
-        OutMeshData.Vertices.Num(), Quads.Num(), VerticesPerQuad);
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("  Vertex welding saved %d duplicate vertices (%.1f%% reduction)"),
-        DuplicateVerticesSaved, 
-        DuplicateVerticesSaved > 0 ? (100.0f * DuplicateVerticesSaved / (DuplicateVerticesSaved + OutMeshData.Vertices.Num())) : 0.0f);
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("=== ConvertQuadsToMesh END ==="));
 }
 
 float FVoxelGreedyMesher::CalculateReductionPercent(
@@ -687,4 +685,30 @@ float FVoxelGreedyMesher::CalculateReductionPercent(
     }
     
     return (1.0f - (float)OptimizedQuadCount / (float)OriginalFaceCount) * 100.0f;
+}
+
+void FVoxelGreedyMesher::GenerateGreedyMeshFromData(
+    const TArray<EVoxelMaterial>& VoxelData,
+    const FVoxelChunkSize& ChunkSize,
+    float VoxelSize,
+    FVoxelMeshData& OutMeshData)
+{
+    // Create a temporary chunk data structure
+    FVoxelChunkData TempChunkData;
+    TempChunkData.ChunkSize = ChunkSize;
+    TempChunkData.ChunkPosition = FIntVector::ZeroValue;
+    
+    // Convert EVoxelMaterial array to FVoxel array
+    TempChunkData.Voxels.SetNum(VoxelData.Num());
+    for (int32 i = 0; i < VoxelData.Num(); i++)
+    {
+        TempChunkData.Voxels[i].Material = VoxelData[i];
+    }
+    
+    // Generate greedy quads
+    TArray<FGreedyQuad> Quads;
+    GenerateGreedyMesh(TempChunkData, Quads);
+    
+    // Convert quads to mesh
+    ConvertQuadsToMesh(Quads, OutMeshData, VoxelSize);
 }

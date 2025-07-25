@@ -45,6 +45,14 @@ public:
         float VoxelSize = 25.0f
     );
     
+    // Generate greedy mesh from raw voxel array
+    static void GenerateGreedyMeshFromData(
+        const TArray<EVoxelMaterial>& VoxelData,
+        const FVoxelChunkSize& ChunkSize,
+        float VoxelSize,
+        FVoxelMeshData& OutMeshData
+    );
+    
     // Get mesh reduction statistics
     static float CalculateReductionPercent(
         int32 OriginalFaceCount,

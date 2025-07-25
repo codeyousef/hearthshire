@@ -12,6 +12,7 @@
 class AVoxelChunk;
 class UVoxelChunkComponent;
 class UVoxelMaterialSet;
+class UVoxelWorldTemplate;
 
 /**
  * Voxel world configuration
@@ -135,6 +136,38 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel")
     FVoxelWorldConfig Config;
     
+    // Template support - Organized for better workflow
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Template", meta = (DisplayName = "Template Mode", Tooltip = "When enabled, world loads from template instead of procedural generation"))
+    bool bUseTemplate = false;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Template", meta = (EditCondition = "bUseTemplate", DisplayName = "World Template", Tooltip = "The template asset to load world data from"))
+    class UVoxelWorldTemplate* WorldTemplate;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Template", meta = (EditCondition = "bUseTemplate", DisplayName = "World Seed", Tooltip = "Seed for minor variations like grass, flowers, and trees"))
+    int32 WorldSeed = 12345;
+    
+    // Template saving properties
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Template Save", meta = (DisplayName = "Template Name", Tooltip = "Name for the new template when saving"))
+    FString TemplateSaveName = "MyWorldTemplate";
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Template Save", meta = (DisplayName = "Template Description", Tooltip = "Description of this world template"))
+    FString TemplateDescription = "A beautiful voxel world";
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Template Save", meta = (DisplayName = "Save Folder", Tooltip = "Folder path where templates will be saved", RelativeToGameContentDir))
+    FString TemplateSaveFolder = "Hearthshire/WorldTemplates/";
+    
+    // Editor preservation
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel|Debug", meta = (DisplayName = "Preserve Editor Chunks", Tooltip = "Keep chunks created in editor when entering Play mode"))
+    bool bPreserveEditorChunks = true;
+    
+    // Dynamic generation control
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Voxel|Debug", meta = (DisplayName = "Disable Dynamic Generation", Tooltip = "When true, only loads existing chunks, doesn't generate new ones based on player position"))
+    bool bDisableDynamicGeneration = false;
+    
+    // Flat world mode
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Voxel|Debug", meta = (DisplayName = "Flat World Mode", Tooltip = "When true, only allows chunks at Z=0 for flat world generation"))
+    bool bFlatWorldMode = false;
+    
     // Chunk management
     UFUNCTION(BlueprintCallable, Category = "Voxel")
     AVoxelChunk* GetOrCreateChunk(const FIntVector& ChunkPosition);
@@ -215,11 +248,33 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Generate Test Terrain"))
     void GenerateTestTerrain();
     
+    UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Generate Flat World", Tooltip = "Creates a perfectly flat world for debugging"))
+    void GenerateFlatWorld();
+    
     UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Clear All Voxels"))
     void ClearAllVoxels();
     
     UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Run Performance Test"))
     void RunPerformanceTest();
+    
+    // Template functions
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Template Save", CallInEditor, meta = (DisplayName = "Save World as Template", Tooltip = "Save the current world state as a reusable template asset"))
+    void SaveWorldAsTemplate();
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Template Save", CallInEditor, meta = (DisplayName = "Create New Template Asset", Tooltip = "Create a new empty template asset in the save folder"))
+    void CreateNewTemplateAsset();
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Template", CallInEditor, meta = (DisplayName = "Load From Template", Tooltip = "Load world data from the assigned template asset"))
+    void LoadFromTemplate();
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Template", CallInEditor, meta = (DisplayName = "Refresh Template", Tooltip = "Reload the template with current seed variations"))
+    void RefreshTemplate();
+    
+    // Not exposed to Blueprint due to FVoxelChunkData type
+    bool LoadChunkFromTemplate(const FIntVector& ChunkPosition, FVoxelChunkData& OutChunkData);
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Template", meta = (DisplayName = "Spawn Landmarks"))
+    void SpawnLandmarkActors();
     
 protected:
     
@@ -270,6 +325,7 @@ protected:
     bool ShouldLoadChunk(const FIntVector& ChunkPosition) const;
     int32 CalculateChunkPriority(const FIntVector& ChunkPosition) const;
     
+    UFUNCTION()
     void OnChunkGenerated(UVoxelChunkComponent* ChunkComponent);
     
 private:

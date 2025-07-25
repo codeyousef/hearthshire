@@ -9,6 +9,17 @@
 #include "Async/ParallelFor.h"
 #include "VoxelPerformanceTest.h"
 #include "VoxelBlueprintLibrary.h"
+#include "VoxelWorldTemplate.h"
+#include "Engine/AssetManager.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "UObject/SavePackage.h"
+#include "Misc/PackageName.h"
+
+#if WITH_EDITOR
+#include "Misc/MessageDialog.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#endif
 
 AVoxelWorld::AVoxelWorld()
 {
@@ -26,6 +37,102 @@ AVoxelWorld::AVoxelWorld()
 void AVoxelWorld::BeginPlay()
 {
     Super::BeginPlay();
+    
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== VoxelWorld BeginPlay ==="));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  bPreserveEditorChunks = %s"), bPreserveEditorChunks ? TEXT("TRUE") : TEXT("FALSE"));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  bDisableDynamicGeneration = %s"), bDisableDynamicGeneration ? TEXT("TRUE") : TEXT("FALSE"));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  bFlatWorldMode = %s"), bFlatWorldMode ? TEXT("TRUE") : TEXT("FALSE"));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  ActiveChunks.Num() = %d"), ActiveChunks.Num());
+    
+    // Find all chunk actors that exist in the world (created in editor)
+    if (bPreserveEditorChunks)
+    {
+        TArray<AActor*> FoundActors;
+        UGameplayStatics::GetAllActorsOfClass(GetWorld(), AVoxelChunk::StaticClass(), FoundActors);
+        
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== BeginPlay: Found %d VoxelChunk actors in world ==="), FoundActors.Num());
+        
+        // First, destroy any chunks that aren't attached to this VoxelWorld
+        TArray<AVoxelChunk*> ChunksToDestroy;
+        for (AActor* Actor : FoundActors)
+        {
+            if (AVoxelChunk* Chunk = Cast<AVoxelChunk>(Actor))
+            {
+                // Check if this chunk belongs to this VoxelWorld
+                if (Chunk->GetAttachParentActor() != this)
+                {
+                    ChunksToDestroy.Add(Chunk);
+                    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Found orphaned chunk, will destroy"));
+                }
+            }
+        }
+        
+        // Destroy orphaned chunks
+        for (AVoxelChunk* Chunk : ChunksToDestroy)
+        {
+            Chunk->Destroy();
+        }
+        
+        // Now process chunks that belong to this world
+        for (AActor* Actor : FoundActors)
+        {
+            if (AVoxelChunk* Chunk = Cast<AVoxelChunk>(Actor))
+            {
+                if (Chunk->GetAttachParentActor() == this && !ChunksToDestroy.Contains(Chunk))
+                {
+                    if (UVoxelChunkComponent* ChunkComp = Chunk->ChunkComponent)
+                    {
+                        FIntVector ChunkPos = ChunkComp->GetChunkPosition();
+                        
+                        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Processing chunk at %s, HasBeenGenerated=%d"), 
+                            *ChunkPos.ToString(), ChunkComp->HasBeenGenerated() ? 1 : 0);
+                        
+                        // Add to ActiveChunks if not already there
+                        if (!ActiveChunks.Contains(ChunkPos))
+                        {
+                            ActiveChunks.Add(ChunkPos, Chunk);
+                            UE_LOG(LogHearthshireVoxel, Warning, TEXT("Preserved editor chunk at %s"), *ChunkPos.ToString());
+                        }
+                        
+                        // Ensure chunk is properly initialized
+                        Chunk->InitializeChunk(ChunkPos, FVoxelChunkSize(Config.ChunkSize), this);
+                        
+                        // Mark as generated to prevent regeneration
+                        ChunkComp->MarkAsGenerated();
+                        
+                        // Set material set if available
+                        if (Config.MaterialSet)
+                        {
+                            ChunkComp->SetMaterialSet(Config.MaterialSet);
+                        }
+                    }
+                }
+            }
+        }
+        
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== Total preserved chunks: %d ==="), ActiveChunks.Num());
+        
+        // Auto-detect flat world mode if all preserved chunks are at Z=0
+        if (ActiveChunks.Num() > 0)
+        {
+            bool bAllChunksAtZ0 = true;
+            for (const auto& ChunkPair : ActiveChunks)
+            {
+                if (ChunkPair.Key.Z != 0)
+                {
+                    bAllChunksAtZ0 = false;
+                    break;
+                }
+            }
+            
+            if (bAllChunksAtZ0)
+            {
+                UE_LOG(LogHearthshireVoxel, Warning, TEXT("Auto-detected flat world (all chunks at Z=0) - enabling flat world mode and disabling dynamic generation"));
+                bFlatWorldMode = true;
+                bDisableDynamicGeneration = true;
+            }
+        }
+    }
     
     // Find player to track
     if (UWorld* World = GetWorld())
@@ -52,6 +159,13 @@ void AVoxelWorld::BeginPlay()
     }
     
     UE_LOG(LogHearthshireVoxel, Log, TEXT("VoxelWorld initialized with %d pooled chunks"), ChunkPool.Num());
+    
+    // If we have preserved chunks and dynamic generation is disabled, we're done
+    if (ActiveChunks.Num() > 0 && bDisableDynamicGeneration)
+    {
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Skipping initial chunk generation - have %d preserved chunks and dynamic generation disabled"), 
+            ActiveChunks.Num());
+    }
     
     OnWorldInitialized.Broadcast();
 }
@@ -84,16 +198,37 @@ void AVoxelWorld::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
     
+    // Skip chunk updates if disabled or if we have preserved editor chunks
+    bool bShouldUpdateChunks = !bDisableDynamicGeneration;
+    
+    if (bShouldUpdateChunks && bPreserveEditorChunks && ActiveChunks.Num() > 0)
+    {
+        // Check if any chunks are manually generated
+        for (const auto& ChunkPair : ActiveChunks)
+        {
+            if (ChunkPair.Value && ChunkPair.Value->ChunkComponent && 
+                ChunkPair.Value->ChunkComponent->HasBeenGenerated())
+            {
+                bShouldUpdateChunks = false;
+                UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("Skipping chunk updates - found manually generated chunks"));
+                break;
+            }
+        }
+    }
+    
     // Update chunks based on player position
     ChunkUpdateTimer += DeltaTime;
-    if (ChunkUpdateTimer >= ChunkUpdateInterval)
+    if (bShouldUpdateChunks && ChunkUpdateTimer >= ChunkUpdateInterval)
     {
         ChunkUpdateTimer = 0.0f;
         UpdateChunks();
     }
     
-    // Process chunk generation tasks
-    ProcessChunkTasks();
+    // Process chunk generation tasks (skip if dynamic generation is disabled)
+    if (!bDisableDynamicGeneration)
+    {
+        ProcessChunkTasks();
+    }
     
     // Memory management
     MemoryCheckTimer += DeltaTime;
@@ -110,8 +245,27 @@ AVoxelChunk* AVoxelWorld::GetOrCreateChunk(const FIntVector& ChunkPosition)
     // Check if chunk already exists
     if (AVoxelChunk** ExistingChunk = ActiveChunks.Find(ChunkPosition))
     {
+        UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("GetOrCreateChunk: Chunk already exists at %s, returning existing"), *ChunkPosition.ToString());
         return *ExistingChunk;
     }
+    
+    // If dynamic generation is disabled, don't create new chunks
+    if (bDisableDynamicGeneration)
+    {
+        UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("GetOrCreateChunk: Dynamic generation disabled, not creating chunk at %s"), *ChunkPosition.ToString());
+        return nullptr;
+    }
+    
+    // If in flat world mode, only allow chunks at Z=0
+    if (bFlatWorldMode && ChunkPosition.Z != 0)
+    {
+        UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("GetOrCreateChunk: Flat world mode enabled, rejecting chunk at Z=%d"), ChunkPosition.Z);
+        return nullptr;
+    }
+    
+    // Debug: log the call stack to see where this is coming from
+    UE_LOG(LogHearthshireVoxel, Error, TEXT("=== CREATING NEW CHUNK at %s (Z level: %d) ==="), *ChunkPosition.ToString(), ChunkPosition.Z);
+    UE_LOG(LogHearthshireVoxel, Error, TEXT("Call stack: bDisableDynamicGeneration=%d"), bDisableDynamicGeneration ? 1 : 0);
     
     // Get chunk from pool
     AVoxelChunk* NewChunk = GetChunkFromPool();
@@ -136,35 +290,86 @@ AVoxelChunk* AVoxelWorld::GetOrCreateChunk(const FIntVector& ChunkPosition)
     {
         ChunkComp->OnChunkGenerated.AddDynamic(this, &AVoxelWorld::OnChunkGenerated);
         
-        // TODO: Generate terrain data for chunk
-        // For now, create a simple test pattern
-        for (int32 Z = 0; Z < ChunkSize.Z / 2; Z++)
+        // Check if we should load from template
+        bool bLoadedFromTemplate = false;
+        if (bUseTemplate && WorldTemplate)
         {
+            FVoxelChunkData TemplateChunkData;
+            if (LoadChunkFromTemplate(ChunkPosition, TemplateChunkData))
+            {
+                ChunkComp->SetChunkData(TemplateChunkData);
+                bLoadedFromTemplate = true;
+                UE_LOG(LogHearthshireVoxel, Log, TEXT("Loaded chunk %s from template"), *ChunkPosition.ToString());
+            }
+        }
+        
+        // If not loaded from template and chunk hasn't been manually generated, generate procedurally
+        if (!bLoadedFromTemplate && !ChunkComp->HasBeenGenerated())
+        {
+            // Generate smooth rolling hills using Perlin noise
+            const float NoiseScale = 0.03f; // Adjust for hill frequency
+            const float HeightScale = 10.0f; // Max height variation
+            const float BaseHeight = 10.0f; // Base terrain height
+            
             for (int32 Y = 0; Y < ChunkSize.Y; Y++)
             {
                 for (int32 X = 0; X < ChunkSize.X; X++)
                 {
-                    EVoxelMaterial Material = EVoxelMaterial::Stone;
-                    if (Z == ChunkSize.Z / 2 - 1)
-                    {
-                        Material = EVoxelMaterial::Grass;
-                    }
-                    else if (Z > ChunkSize.Z / 2 - 4)
-                    {
-                        Material = EVoxelMaterial::Dirt;
-                    }
+                    // Calculate world position for seamless noise across chunks
+                    float WorldX = (ChunkPosition.X * ChunkSize.X + X) * NoiseScale;
+                    float WorldY = (ChunkPosition.Y * ChunkSize.Y + Y) * NoiseScale;
                     
-                    ChunkComp->SetVoxel(X, Y, Z, Material);
+                    // Generate height using 2D Perlin noise
+                    float NoiseValue = FMath::PerlinNoise2D(FVector2D(WorldX, WorldY));
+                    // Convert from [-1, 1] to [0, 1]
+                    NoiseValue = (NoiseValue + 1.0f) * 0.5f;
+                    
+                    // Calculate terrain height (5-15 voxels)
+                    int32 TerrainHeight = FMath::FloorToInt(BaseHeight + NoiseValue * HeightScale);
+                    TerrainHeight = FMath::Clamp(TerrainHeight, 5, 15);
+                    
+                    // Fill voxels from bottom to height
+                    for (int32 Z = 0; Z < ChunkSize.Z; Z++)
+                    {
+                        if (Z < TerrainHeight)
+                        {
+                            EVoxelMaterial Material;
+                            
+                            // Top layer is grass
+                            if (Z == TerrainHeight - 1)
+                            {
+                                Material = EVoxelMaterial::Grass;
+                            }
+                            // Next 3 layers are dirt
+                            else if (Z >= TerrainHeight - 4)
+                            {
+                                Material = EVoxelMaterial::Dirt;
+                            }
+                            // Everything else is stone
+                            else
+                            {
+                                Material = EVoxelMaterial::Stone;
+                            }
+                            
+                            ChunkComp->SetVoxel(X, Y, Z, Material);
+                        }
+                        // else leave as air
+                    }
                 }
             }
+            
+            // Don't generate mesh here - let QueueChunkGeneration handle it
         }
     }
     
     // Add to active chunks
     ActiveChunks.Add(ChunkPosition, NewChunk);
     
-    // Queue for generation
-    QueueChunkGeneration(ChunkPosition, CalculateChunkPriority(ChunkPosition));
+    // Queue for generation only if chunk hasn't been manually generated
+    if (NewChunk && NewChunk->ChunkComponent && !NewChunk->ChunkComponent->HasBeenGenerated())
+    {
+        QueueChunkGeneration(ChunkPosition, CalculateChunkPriority(ChunkPosition));
+    }
     
     OnChunkLoaded.Broadcast(ChunkPosition);
     
@@ -346,10 +551,16 @@ FVoxelPerformanceStats AVoxelWorld::GetWorldStats() const
 
 void AVoxelWorld::UpdateChunks()
 {
-    if (!TrackedPlayer)
+    if (!TrackedPlayer || bDisableDynamicGeneration)
     {
+        UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("UpdateChunks: Skipping - TrackedPlayer=%p, bDisableDynamicGeneration=%d"), 
+            TrackedPlayer, bDisableDynamicGeneration ? 1 : 0);
         return;
     }
+    
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== UpdateChunks called - creating chunks around player ==="));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  bFlatWorldMode = %s"), bFlatWorldMode ? TEXT("TRUE") : TEXT("FALSE"));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  bDisableDynamicGeneration = %s (should be TRUE!)"), bDisableDynamicGeneration ? TEXT("TRUE") : TEXT("FALSE"));
     
     FVector PlayerPosition = TrackedPlayer->GetActorLocation();
     FIntVector PlayerChunk = WorldToChunkPosition(PlayerPosition);
@@ -361,7 +572,11 @@ void AVoxelWorld::UpdateChunks()
     {
         for (int32 Y = -ViewDistance; Y <= ViewDistance; Y++)
         {
-            for (int32 Z = -2; Z <= 2; Z++) // Limited vertical range
+            // Determine Z range based on flat world mode
+            int32 MinZ = bFlatWorldMode ? 0 : -2;
+            int32 MaxZ = bFlatWorldMode ? 0 : 2;
+            
+            for (int32 Z = MinZ; Z <= MaxZ; Z++)
             {
                 FIntVector ChunkPos = PlayerChunk + FIntVector(X, Y, Z);
                 
@@ -420,6 +635,12 @@ void AVoxelWorld::ProcessChunkTasks()
             {
                 if (UVoxelChunkComponent* ChunkComp = Chunk->ChunkComponent)
                 {
+                    // Skip if chunk has been manually generated (unless it's a forced regeneration)
+                    if (ChunkComp->HasBeenGenerated() && !Task.bIsRegeneration)
+                    {
+                        continue;
+                    }
+                    
                     if (ChunkComp->GetState() != EVoxelChunkState::Ready || Task.bIsRegeneration)
                     {
                         ActiveGenerations.Increment();
@@ -660,6 +881,161 @@ void AVoxelWorld::GenerateTestTerrain()
     UE_LOG(LogHearthshireVoxel, Log, TEXT("Generated test terrain with %d chunks"), GridSize * GridSize);
 }
 
+void AVoxelWorld::GenerateFlatWorld()
+{
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("=== GenerateFlatWorld called ==="));
+    
+    // Enable flat world mode and disable dynamic generation
+    bFlatWorldMode = true;
+    bDisableDynamicGeneration = true;
+    
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Set bFlatWorldMode = TRUE"));
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("Set bDisableDynamicGeneration = TRUE"));
+    
+    // Only unload chunks if we're in editor mode
+    // In Play mode, we want to keep existing chunks
+    if (GetWorld() && !GetWorld()->IsPlayInEditor())
+    {
+        // First, unload all chunks to start fresh
+        UnloadAllChunks();
+    }
+    
+    // Clear any pending generation tasks
+    {
+        FScopeLock Lock(&TaskQueueLock);
+        while (!ChunkTaskQueue.IsEmpty())
+        {
+            FVoxelChunkTask Task;
+            ChunkTaskQueue.Dequeue(Task);
+        }
+    }
+    GeneratingChunks.Empty();
+    
+    // Set a flag to prevent automatic terrain generation
+    bool bOriginalUseTemplate = bUseTemplate;
+    bUseTemplate = true; // This prevents automatic terrain generation in GetOrCreateChunk
+    WorldTemplate = nullptr; // But with no template, it won't load anything
+    
+    // Create a 5x5 grid of chunks
+    const int32 GridSize = 5;
+    const int32 HalfGrid = GridSize / 2;
+    
+    // Create chunks using GetOrCreateChunk to ensure proper setup
+    for (int32 ChunkX = -HalfGrid; ChunkX <= HalfGrid; ChunkX++)
+    {
+        for (int32 ChunkY = -HalfGrid; ChunkY <= HalfGrid; ChunkY++)
+        {
+            FIntVector ChunkPos(ChunkX, ChunkY, 0);
+            AVoxelChunk* NewChunk = GetOrCreateChunk(ChunkPos);
+            
+            if (!NewChunk || !NewChunk->ChunkComponent)
+            {
+                UE_LOG(LogHearthshireVoxel, Error, TEXT("Failed to create chunk at %s"), *ChunkPos.ToString());
+                continue;
+            }
+            
+            // Mark as generated immediately to prevent queued generation
+            NewChunk->ChunkComponent->MarkAsGenerated();
+        }
+    }
+    
+    // Restore original template setting
+    bUseTemplate = bOriginalUseTemplate;
+    
+    // Now fill all chunks with flat terrain at height 10
+    const int32 FlatHeight = 10;
+    
+    for (const auto& ChunkPair : ActiveChunks)
+    {
+        if (ChunkPair.Value && ChunkPair.Value->ChunkComponent)
+        {
+            UVoxelChunkComponent* ChunkComp = ChunkPair.Value->ChunkComponent;
+            const FIntVector& ChunkPos = ChunkPair.Key;
+            const FVoxelChunkSize& ChunkSize = ChunkComp->GetChunkSize();
+            
+            
+            // Clear the chunk first - ensure ALL voxels are set to air
+            ChunkComp->ClearChunk();
+            
+            // Double-check the chunk is clear by explicitly setting all voxels to air first
+            for (int32 LocalX = 0; LocalX < ChunkSize.X; LocalX++)
+            {
+                for (int32 LocalY = 0; LocalY < ChunkSize.Y; LocalY++)
+                {
+                    for (int32 LocalZ = 0; LocalZ < ChunkSize.Z; LocalZ++)
+                    {
+                        ChunkComp->SetVoxel(LocalX, LocalY, LocalZ, EVoxelMaterial::Air);
+                    }
+                }
+            }
+            
+            // Now fill with flat terrain
+            for (int32 LocalX = 0; LocalX < ChunkSize.X; LocalX++)
+            {
+                for (int32 LocalY = 0; LocalY < ChunkSize.Y; LocalY++)
+                {
+                    for (int32 LocalZ = 0; LocalZ < FlatHeight; LocalZ++)
+                    {
+                        EVoxelMaterial Material;
+                        
+                        // Top layer (Z = 9) is grass
+                        if (LocalZ == FlatHeight - 1)
+                        {
+                            Material = EVoxelMaterial::Grass;
+                        }
+                        // Everything below is dirt
+                        else
+                        {
+                            Material = EVoxelMaterial::Dirt;
+                        }
+                        
+                        ChunkComp->SetVoxel(LocalX, LocalY, LocalZ, Material);
+                    }
+                }
+            }
+            
+            // Log voxel count for debugging
+            int32 VoxelCount = ChunkComp->GetVoxelCount();
+            int32 ExpectedCount = ChunkSize.X * ChunkSize.Y * FlatHeight;
+            
+            // Test a few voxel positions to ensure they're set correctly
+            EVoxelMaterial TestMat1 = ChunkComp->GetVoxel(0, 0, 0); // Should be Dirt
+            EVoxelMaterial TestMat2 = ChunkComp->GetVoxel(0, 0, 9); // Should be Grass
+            EVoxelMaterial TestMat3 = ChunkComp->GetVoxel(0, 0, 10); // Should be Air
+            
+            
+            // Count voxels at each Z level to debug the pyramid issue
+            TArray<int32> VoxelsPerLevel;
+            VoxelsPerLevel.SetNum(ChunkSize.Z);
+            for (int32 Z = 0; Z < ChunkSize.Z; Z++)
+            {
+                int32 CountAtZ = 0;
+                for (int32 Y = 0; Y < ChunkSize.Y; Y++)
+                {
+                    for (int32 X = 0; X < ChunkSize.X; X++)
+                    {
+                        if (ChunkComp->GetVoxel(X, Y, Z) != EVoxelMaterial::Air)
+                        {
+                            CountAtZ++;
+                        }
+                    }
+                }
+                VoxelsPerLevel[Z] = CountAtZ;
+                if (CountAtZ > 0)
+                {
+                }
+            }
+            
+            // Mark chunk as manually generated so it won't be regenerated
+            ChunkComp->MarkAsGenerated();
+            
+            // Generate mesh immediately
+            ChunkComp->GenerateMesh(false);
+        }
+    }
+    
+}
+
 void AVoxelWorld::ClearAllVoxels()
 {
     for (const auto& ChunkPair : ActiveChunks)
@@ -677,6 +1053,257 @@ void AVoxelWorld::RunPerformanceTest()
     FString Report = UVoxelPerformanceTest::GenerateTestReport(Results);
     
     UE_LOG(LogHearthshireVoxel, Log, TEXT("Performance Test Results:\n%s"), *Report);
+}
+
+// Template Functions Implementation
+
+void AVoxelWorld::SaveWorldAsTemplate()
+{
+#if WITH_EDITOR
+    // If no template assigned, create a new one
+    if (!WorldTemplate)
+    {
+        CreateNewTemplateAsset();
+        if (!WorldTemplate)
+        {
+            return; // Failed to create template
+        }
+    }
+    
+    // Use the configured template name
+    FString TemplateName = TemplateSaveName;
+    if (TemplateName.IsEmpty())
+    {
+        TemplateName = "UnnamedTemplate";
+    }
+    
+    // Update template metadata
+    WorldTemplate->TemplateName = TemplateName;
+    WorldTemplate->Description = TemplateDescription;
+    
+    bool bSuccess = UVoxelTemplateUtility::SaveWorldAsTemplate(this, WorldTemplate, TemplateName);
+    
+    if (bSuccess)
+    {
+        // Mark the asset as dirty so it saves
+        WorldTemplate->MarkPackageDirty();
+        
+        // Show success notification
+        FNotificationInfo Info(FText::Format(
+            FText::FromString("World saved as template: {0}"),
+            FText::FromString(TemplateName)
+        ));
+        Info.ExpireDuration = 4.0f;
+        Info.bUseLargeFont = true;
+        Info.bUseSuccessFailIcons = true;
+        Info.Image = FSlateIcon(FSlateIcon("EditorStyle", "Icons.SuccessWithCircle").GetStyleSetName(), 
+                                FSlateIcon("EditorStyle", "Icons.SuccessWithCircle").GetStyleName()).GetIcon();
+        
+        FSlateNotificationManager::Get().AddNotification(Info);
+        
+        UE_LOG(LogHearthshireVoxel, Log, TEXT("World saved to template: %s at %s"), 
+            *TemplateName, *WorldTemplate->GetPathName());
+    }
+    else
+    {
+        FText Title = FText::FromString("Save Failed");
+        FText Message = FText::FromString("Failed to save world to template. Check the log for details.");
+        FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
+    }
+#endif
+}
+
+void AVoxelWorld::LoadFromTemplate()
+{
+#if WITH_EDITOR
+    if (!WorldTemplate)
+    {
+        FText Title = FText::FromString("No Template Asset");
+        FText Message = FText::FromString("Please assign a World Template asset to load world data from.");
+        FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
+        return;
+    }
+    
+    // Clear existing world
+    UnloadAllChunks();
+    
+    // Load all chunks from template
+    int32 LoadedChunks = 0;
+    for (const FVoxelTemplateChunk& TemplateChunk : WorldTemplate->ChunkData)
+    {
+        if (TemplateChunk.bHasData)
+        {
+            AVoxelChunk* Chunk = GetOrCreateChunk(TemplateChunk.ChunkPosition);
+            if (Chunk)
+            {
+                UVoxelChunkComponent* ChunkComp = Chunk->FindComponentByClass<UVoxelChunkComponent>();
+                if (ChunkComp)
+                {
+                    FVoxelChunkData ChunkData;
+                    if (LoadChunkFromTemplate(TemplateChunk.ChunkPosition, ChunkData))
+                    {
+                        // Apply the loaded data to the chunk
+                        ChunkComp->SetChunkData(ChunkData);
+                        ChunkComp->GenerateMesh(false);
+                        LoadedChunks++;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Spawn landmarks
+    SpawnLandmarkActors();
+    
+    // Show success notification
+    FNotificationInfo Info(FText::Format(
+        FText::FromString("Loaded {0} chunks from template: {1}"),
+        FText::AsNumber(LoadedChunks),
+        FText::FromString(WorldTemplate->TemplateName)
+    ));
+    Info.ExpireDuration = 4.0f;
+    Info.bUseLargeFont = true;
+    Info.bUseSuccessFailIcons = true;
+    Info.Image = FSlateIcon(FSlateIcon("EditorStyle", "Icons.SuccessWithCircle").GetStyleSetName(), 
+                            FSlateIcon("EditorStyle", "Icons.SuccessWithCircle").GetStyleName()).GetIcon();
+    
+    FSlateNotificationManager::Get().AddNotification(Info);
+    
+    // Enable template mode
+    bUseTemplate = true;
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("Successfully loaded %d chunks from template: %s"), 
+        LoadedChunks, *WorldTemplate->TemplateName);
+#endif
+}
+
+bool AVoxelWorld::LoadChunkFromTemplate(const FIntVector& ChunkPosition, FVoxelChunkData& OutChunkData)
+{
+    if (!WorldTemplate || !bUseTemplate)
+    {
+        return false;
+    }
+    
+    // Load base chunk data from template
+    if (!UVoxelTemplateUtility::LoadChunkFromTemplate(WorldTemplate, ChunkPosition, OutChunkData))
+    {
+        return false;
+    }
+    
+    // Apply seed-based variations if enabled
+    if (WorldTemplate->bAllowSeedVariations)
+    {
+        UVoxelTemplateUtility::ApplySeedVariations(OutChunkData, WorldTemplate, WorldSeed, ChunkPosition);
+    }
+    
+    return true;
+}
+
+void AVoxelWorld::CreateNewTemplateAsset()
+{
+#if WITH_EDITOR
+    // Ensure save folder exists
+    FString PackagePath = FString::Printf(TEXT("/Game/%s"), *TemplateSaveFolder);
+    
+    // Create package name from template name
+    FString AssetName = TemplateSaveName;
+    if (AssetName.IsEmpty())
+    {
+        AssetName = FString::Printf(TEXT("WorldTemplate_%d"), FDateTime::Now().GetTicks());
+    }
+    
+    // Sanitize the asset name
+    AssetName = FPackageName::GetLongPackageAssetName(AssetName);
+    
+    FString PackageName = FString::Printf(TEXT("%s%s"), *PackagePath, *AssetName);
+    UPackage* Package = CreatePackage(*PackageName);
+    
+    if (!Package)
+    {
+        FText Title = FText::FromString("Create Failed");
+        FText Message = FText::FromString("Failed to create package for template asset.");
+        FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
+        return;
+    }
+    
+    // Create the template asset
+    UVoxelWorldTemplate* NewTemplate = NewObject<UVoxelWorldTemplate>(Package, UVoxelWorldTemplate::StaticClass(), *AssetName, RF_Public | RF_Standalone);
+    
+    if (NewTemplate)
+    {
+        // Initialize template properties
+        NewTemplate->TemplateName = TemplateSaveName;
+        NewTemplate->Description = TemplateDescription;
+        NewTemplate->CreationDate = FDateTime::Now();
+        NewTemplate->CreatorName = FPlatformProcess::UserName();
+        
+        // Mark package dirty
+        Package->MarkPackageDirty();
+        
+        // Register with asset registry
+        FAssetRegistryModule::AssetCreated(NewTemplate);
+        
+        // Assign to world
+        WorldTemplate = NewTemplate;
+        
+        // Show notification
+        FNotificationInfo Info(FText::Format(
+            FText::FromString("Created new template asset: {0}"),
+            FText::FromString(AssetName)
+        ));
+        Info.ExpireDuration = 3.0f;
+        Info.bUseLargeFont = true;
+        FSlateNotificationManager::Get().AddNotification(Info);
+        
+        UE_LOG(LogHearthshireVoxel, Log, TEXT("Created new template asset: %s"), *PackageName);
+    }
+    else
+    {
+        FText Title = FText::FromString("Create Failed");
+        FText Message = FText::FromString("Failed to create template asset.");
+        FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
+    }
+#endif
+}
+
+void AVoxelWorld::RefreshTemplate()
+{
+    if (bUseTemplate && WorldTemplate)
+    {
+        LoadFromTemplate();
+    }
+}
+
+void AVoxelWorld::SpawnLandmarkActors()
+{
+    if (!WorldTemplate)
+    {
+        return;
+    }
+    
+    // Spawn actors for each landmark
+    for (const FVoxelLandmark& Landmark : WorldTemplate->Landmarks)
+    {
+        if (Landmark.ActorToSpawn)
+        {
+            FActorSpawnParameters SpawnParams;
+            SpawnParams.Name = FName(*FString::Printf(TEXT("%s_Actor"), *Landmark.Name));
+            SpawnParams.Owner = this;
+            
+            AActor* SpawnedActor = GetWorld()->SpawnActor<AActor>(
+                Landmark.ActorToSpawn,
+                Landmark.WorldPosition,
+                FRotator::ZeroRotator,
+                SpawnParams
+            );
+            
+            if (SpawnedActor)
+            {
+                UE_LOG(LogHearthshireVoxel, Log, TEXT("Spawned landmark actor '%s' at %s"),
+                    *Landmark.Name, *Landmark.WorldPosition.ToString());
+            }
+        }
+    }
 }
 
 // UVoxelWorldComponent Implementation

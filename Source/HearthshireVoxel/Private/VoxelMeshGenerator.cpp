@@ -103,8 +103,6 @@ void FVoxelMeshGenerator::GenerateGreedyMesh(
     // Convert quads to mesh
     FVoxelGreedyMesher::ConvertQuadsToMesh(Quads, OutMeshData, Config.VoxelSize);
     
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("GenerateGreedyMesh after ConvertQuadsToMesh: Triangles array: %d"), 
-        OutMeshData.Triangles.Num());
     
     // Post-processing
     if (Config.bGenerateTangents)
@@ -117,8 +115,6 @@ void FVoxelMeshGenerator::GenerateGreedyMesh(
     OutMeshData.VertexCount = OutMeshData.Vertices.Num();
     OutMeshData.GenerationTimeMs = (FPlatformTime::Seconds() - StartTime) * 1000.0f;
     
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("GenerateGreedyMesh FINAL: Triangles array: %d, TriangleCount: %d"), 
-        OutMeshData.Triangles.Num(), OutMeshData.TriangleCount);
 }
 
 void FVoxelMeshGenerator::GenerateLODMesh(
@@ -151,11 +147,7 @@ void FVoxelMeshGenerator::ApplyMeshToComponent(
         return;
     }
     
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Applying %d vertices, %d triangles (%d indices), %d material sections"), 
-        MeshData.Vertices.Num(), MeshData.Triangles.Num() / 3, MeshData.Triangles.Num(), MeshData.MaterialSections.Num());
     
-    // Log which code path we're taking
-    UE_LOG(LogHearthshireVoxel, Warning, TEXT("ApplyMeshToComponent: NEW CODE - Creating single section to avoid duplicates"));
     
     // Configure component for opaque rendering
     Component->bUseAsyncCooking = true;
@@ -179,7 +171,6 @@ void FVoxelMeshGenerator::ApplyMeshToComponent(
         }
         
         // Create a single mesh section with all data (fallback for basic visibility)
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Creating mesh section 0 with %d triangles"), MeshData.Triangles.Num() / 3);
         Component->CreateMeshSection(
             0, // Section index
             MeshData.Vertices,
@@ -220,7 +211,6 @@ void FVoxelMeshGenerator::ApplyMeshToComponent(
         }
         
         // Create a single mesh section with all geometry
-        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Creating mesh section 0 with materials, %d triangles"), MeshData.Triangles.Num() / 3);
         Component->CreateMeshSection(
             0, // Single section index
             MeshData.Vertices,
@@ -242,18 +232,14 @@ void FVoxelMeshGenerator::ApplyMeshToComponent(
             if (Material)
             {
                 Component->SetMaterial(0, Material);
-                UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Applied material %d to single section"), (int32)FirstMaterial);
             }
         }
         
-        UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Created single mesh section to avoid duplicate geometry"));
     }
     
     // Update bounds and mark render state dirty
     Component->UpdateBounds();
     Component->MarkRenderStateDirty();
-    
-    UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Mesh application completed"));
 }
 
 void FVoxelMeshGenerator::AddFace(

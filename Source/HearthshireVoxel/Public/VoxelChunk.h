@@ -106,6 +106,23 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Voxel")
     FVoxelPerformanceStats GetPerformanceStats() const { return PerformanceStats; }
     
+    // Get chunk data (const reference) - Not exposed to Blueprint
+    const FVoxelChunkData& GetChunkData() const { return ChunkData; }
+    
+    // Set chunk data (for loading from templates) - Not exposed to Blueprint
+    void SetChunkData(const FVoxelChunkData& NewChunkData);
+    
+    // Check if chunk has been generated
+    UFUNCTION(BlueprintCallable, Category = "Voxel")
+    bool HasBeenGenerated() const { return bHasBeenGenerated; }
+    
+    // Mark chunk as generated
+    UFUNCTION(BlueprintCallable, Category = "Voxel")
+    void MarkAsGenerated() { bHasBeenGenerated = true; }
+    
+    // Set material set
+    void SetMaterialSet(UVoxelMaterialSet* InMaterialSet) { MaterialSet = InMaterialSet; }
+    
     // Additional utility functions
     UFUNCTION(BlueprintCallable, Category = "Voxel", meta = (DisplayName = "Get Voxel Count"))
     int32 GetVoxelCount() const;
@@ -329,6 +346,10 @@ protected:
     // Procedural mesh component
     UPROPERTY(BlueprintReadOnly, Category = "Voxel|Components", meta = (AllowPrivateAccess = "true"))
     UProceduralMeshComponent* ProceduralMesh;
+    
+    // Flag to indicate if chunk has been manually generated
+    UPROPERTY()
+    bool bHasBeenGenerated;
     
     // Material set
     UPROPERTY(BlueprintReadOnly, Category = "Voxel|Components", meta = (AllowPrivateAccess = "true"))
