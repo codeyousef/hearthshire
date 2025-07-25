@@ -172,6 +172,19 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Voxel")
     int32 GetPooledChunkCount() const { return ChunkPool.Num(); }
     
+    // Additional management functions
+    UFUNCTION(BlueprintCallable, Category = "Voxel", meta = (DisplayName = "Get All Active Chunks"))
+    TArray<AVoxelChunk*> GetAllActiveChunks() const;
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel", meta = (DisplayName = "Unload All Chunks"))
+    void UnloadAllChunks();
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel", meta = (DisplayName = "Set Memory Budget"))
+    void SetMemoryBudget(int32 NewBudgetMB);
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel", meta = (DisplayName = "Get Chunk At Position"))
+    AVoxelChunk* GetChunkAtPosition(const FIntVector& ChunkPosition) const;
+    
     // Events
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkLoaded, const FIntVector&, ChunkPosition);
     UPROPERTY(BlueprintAssignable, Category = "Voxel")
@@ -181,9 +194,32 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "Voxel")
     FOnChunkUnloaded OnChunkUnloaded;
     
+    // Additional events
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMemoryBudgetExceeded);
+    UPROPERTY(BlueprintAssignable, Category = "Voxel")
+    FOnMemoryBudgetExceeded OnMemoryBudgetExceeded;
+    
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnChunkGenerationQueued, const FIntVector&, ChunkPosition, int32, Priority);
+    UPROPERTY(BlueprintAssignable, Category = "Voxel")
+    FOnChunkGenerationQueued OnChunkGenerationQueued;
+    
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWorldInitialized);
+    UPROPERTY(BlueprintAssignable, Category = "Voxel")
+    FOnWorldInitialized OnWorldInitialized;
+    
     // Chunk storage (made public for Blueprint access)
     UPROPERTY(BlueprintReadOnly, Category = "Voxel")
     TMap<FIntVector, AVoxelChunk*> ActiveChunks;
+    
+    // Editor testing functions
+    UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Generate Test Terrain"))
+    void GenerateTestTerrain();
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Clear All Voxels"))
+    void ClearAllVoxels();
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel", CallInEditor, meta = (DisplayName = "Run Performance Test"))
+    void RunPerformanceTest();
     
 protected:
     
@@ -204,16 +240,22 @@ protected:
     FVoxelPerformanceStats WorldStats;
     
     // Player tracking
-    UPROPERTY()
+    UPROPERTY(BlueprintReadWrite, Category = "Voxel", meta = (DisplayName = "Tracked Player"))
     APawn* TrackedPlayer;
     FVector LastPlayerPosition;
     
     // Update frequencies
+    UPROPERTY(EditAnywhere, Category = "Voxel|Performance", meta = (ClampMin = "0.05", ClampMax = "1.0"))
     float ChunkUpdateTimer;
-    static constexpr float ChunkUpdateInterval = 0.1f;
     
+    UPROPERTY(EditAnywhere, Category = "Voxel|Performance", meta = (ClampMin = "0.05", ClampMax = "1.0", DisplayName = "Chunk Update Interval"))
+    float ChunkUpdateInterval = 0.1f;
+    
+    UPROPERTY(EditAnywhere, Category = "Voxel|Performance", meta = (ClampMin = "0.5", ClampMax = "5.0"))
     float MemoryCheckTimer;
-    static constexpr float MemoryCheckInterval = 1.0f;
+    
+    UPROPERTY(EditAnywhere, Category = "Voxel|Performance", meta = (ClampMin = "0.5", ClampMax = "5.0", DisplayName = "Memory Check Interval"))
+    float MemoryCheckInterval = 1.0f;
     
     // Internal functions
     void UpdateChunks();

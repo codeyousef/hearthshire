@@ -15,12 +15,24 @@ void FVoxelGreedyMesher::GenerateGreedyMesh(
     
     OutQuads.Empty();
     
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateGreedyMesh: Starting greedy mesh generation for chunk %s"),
+        *ChunkData.ChunkPosition.ToString());
+    
+    // Count visible faces before optimization
+    int32 VisibleFaceCount = 0;
+    
     // Process each of the 6 face directions
     for (int32 FaceIndex = 0; FaceIndex < 6; FaceIndex++)
     {
         EVoxelFace Face = static_cast<EVoxelFace>(FaceIndex);
+        int32 QuadsBefore = OutQuads.Num();
         ProcessFaceDirection(ChunkData, Face, OutQuads);
+        int32 QuadsAdded = OutQuads.Num() - QuadsBefore;
+        
+        UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("  Face %d: Generated %d quads"), FaceIndex, QuadsAdded);
     }
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateGreedyMesh: Generated %d greedy quads"), OutQuads.Num());
 }
 
 void FVoxelGreedyMesher::ProcessFaceDirection(
@@ -122,6 +134,13 @@ void FVoxelGreedyMesher::ExtractQuadsFromMask(
             FIntVector VoxelPos = MaskToVoxelPosition(U, V, SliceIndex, Face);
             FGreedyQuad Quad(VoxelPos, QuadSize, Face, Material);
             OutQuads.Add(Quad);
+            
+            // Debug logging for large quads
+            if (QuadSize.X > 1 || QuadSize.Y > 1)
+            {
+                UE_LOG(LogHearthshireVoxel, VeryVerbose, TEXT("    Created greedy quad: Pos=%s, Size=%s, Face=%d, Material=%d"),
+                    *VoxelPos.ToString(), *QuadSize.ToString(), (int32)Face, (int32)Material);
+            }
             
             // Mark the area as processed
             MarkQuadProcessed(Mask, MaskDimensions, StartPos, QuadSize);
@@ -270,7 +289,32 @@ bool FVoxelGreedyMesher::IsFaceVisible(
         return false;
     }
     
-    const FVoxel NeighborVoxel = GetNeighborVoxel(ChunkData, X, Y, Z, Face);
+    // Get the direction offset for this face
+    FIntVector Offset;
+    switch (Face)
+    {
+        case EVoxelFace::Front:  Offset = FIntVector(0, 1, 0); break;   // +Y
+        case EVoxelFace::Back:   Offset = FIntVector(0, -1, 0); break;  // -Y
+        case EVoxelFace::Right:  Offset = FIntVector(1, 0, 0); break;   // +X
+        case EVoxelFace::Left:   Offset = FIntVector(-1, 0, 0); break;  // -X
+        case EVoxelFace::Top:    Offset = FIntVector(0, 0, 1); break;   // +Z
+        case EVoxelFace::Bottom: Offset = FIntVector(0, 0, -1); break;  // -Z
+        default: Offset = FIntVector::ZeroValue; break;
+    }
+    
+    int32 NeighborX = X + Offset.X;
+    int32 NeighborY = Y + Offset.Y;
+    int32 NeighborZ = Z + Offset.Z;
+    
+    // Check if neighbor is out of bounds - if so, face is visible
+    if (NeighborX < 0 || NeighborX >= ChunkData.ChunkSize.X ||
+        NeighborY < 0 || NeighborY >= ChunkData.ChunkSize.Y ||
+        NeighborZ < 0 || NeighborZ >= ChunkData.ChunkSize.Z)
+    {
+        return true; // Face is at chunk boundary, so it's visible
+    }
+    
+    const FVoxel NeighborVoxel = ChunkData.GetVoxel(NeighborX, NeighborY, NeighborZ);
     
     // Face is visible if neighbor is air or transparent with different material
     return NeighborVoxel.IsAir() || 
@@ -301,6 +345,29 @@ FVoxel FVoxelGreedyMesher::GetNeighborVoxel(
     return ChunkData.GetVoxel(X + Offset.X, Y + Offset.Y, Z + Offset.Z);
 }
 
+// Vertex key for spatial hashing - handles floating point precision
+struct FVertexKey
+{
+    int32 X, Y, Z;
+    
+    FVertexKey(const FVector& Pos, float Scale = 100.0f)
+    {
+        X = FMath::RoundToInt(Pos.X * Scale);
+        Y = FMath::RoundToInt(Pos.Y * Scale);
+        Z = FMath::RoundToInt(Pos.Z * Scale);
+    }
+    
+    bool operator==(const FVertexKey& Other) const
+    {
+        return X == Other.X && Y == Other.Y && Z == Other.Z;
+    }
+    
+    friend uint32 GetTypeHash(const FVertexKey& Key)
+    {
+        return HashCombine(HashCombine(GetTypeHash(Key.X), GetTypeHash(Key.Y)), GetTypeHash(Key.Z));
+    }
+};
+
 void FVoxelGreedyMesher::ConvertQuadsToMesh(
     const TArray<FGreedyQuad>& Quads,
     FVoxelMeshData& OutMeshData,
@@ -308,91 +375,306 @@ void FVoxelGreedyMesher::ConvertQuadsToMesh(
 {
     OutMeshData.Clear();
     
-    // Reserve space for all quads
-    const int32 VerticesPerQuad = 4;
-    const int32 IndicesPerQuad = 6;
-    OutMeshData.Reserve(Quads.Num() * VerticesPerQuad, Quads.Num() * IndicesPerQuad);
+    // Vertex deduplication map: Position -> Vertex Index
+    TMap<FVertexKey, int32> VertexMap;
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("=== ConvertQuadsToMesh START ==="));
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("Converting %d greedy quads to mesh with vertex welding"), Quads.Num());
+    
+    // Reserve approximate space (assuming ~25% vertex sharing)
+    const int32 EstimatedVertices = FMath::Max(Quads.Num(), 100);
+    const int32 EstimatedTriangles = Quads.Num() * 6;
+    OutMeshData.Reserve(EstimatedVertices, EstimatedTriangles);
+    
+    int32 DuplicateVerticesSaved = 0;
+    int32 QuadIndex = 0;
     
     for (const FGreedyQuad& Quad : Quads)
     {
-        // Calculate base position and size in world units
+        // Log first few quads in detail
+        if (QuadIndex < 5)
+        {
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("Quad %d: Pos(%d,%d,%d), Size(%d,%d,%d), Face:%d, Material:%d"),
+                QuadIndex,
+                Quad.Position.X, Quad.Position.Y, Quad.Position.Z,
+                Quad.Size.X, Quad.Size.Y, Quad.Size.Z,
+                (int32)Quad.Face, (int32)Quad.Material);
+        }
+        
+        // Calculate base position in world units
         const FVector BasePos = FVector(Quad.Position) * VoxelSize;
-        const FVector QuadWorldSize = FVector(Quad.Size) * VoxelSize;
         
         // Get face axes
         int32 PrimaryAxis, UAxis, VAxis;
         GetFaceAxes(Quad.Face, PrimaryAxis, UAxis, VAxis);
         
-        // Calculate vertices based on face orientation and quad size
+        // Calculate size in world units for U and V axes
+        // IMPORTANT: Quad.Size.X is always U dimension, Quad.Size.Y is always V dimension
+        // regardless of which world axes they map to
+        FVector SizeVector = FVector::ZeroVector;
+        SizeVector[UAxis] = Quad.Size.X * VoxelSize;  // U dimension size
+        SizeVector[VAxis] = Quad.Size.Y * VoxelSize;  // V dimension size
+        
+        // Calculate vertices based on face orientation
         FVector Vertices[4];
         FVector Normal = FVoxelMeshGenerator::GetFaceNormal(Quad.Face);
         
-        // Adjust vertex positions based on quad size
+        // Position vertices correctly based on face direction
         switch (Quad.Face)
         {
-            case EVoxelFace::Front: // +Y
+            case EVoxelFace::Front: // +Y (facing positive Y)
                 Vertices[0] = BasePos + FVector(0, VoxelSize, 0);
-                Vertices[1] = BasePos + FVector(QuadWorldSize.X, VoxelSize, 0);
-                Vertices[2] = BasePos + FVector(QuadWorldSize.X, VoxelSize, QuadWorldSize.Y);
-                Vertices[3] = BasePos + FVector(0, VoxelSize, QuadWorldSize.Y);
+                Vertices[1] = BasePos + FVector(SizeVector.X, VoxelSize, 0);
+                Vertices[2] = BasePos + FVector(SizeVector.X, VoxelSize, SizeVector.Z);
+                Vertices[3] = BasePos + FVector(0, VoxelSize, SizeVector.Z);
                 break;
                 
-            case EVoxelFace::Back: // -Y
-                Vertices[0] = BasePos + FVector(QuadWorldSize.X, 0, 0);
+            case EVoxelFace::Back: // -Y (facing negative Y)
+                Vertices[0] = BasePos + FVector(SizeVector.X, 0, 0);
                 Vertices[1] = BasePos + FVector(0, 0, 0);
-                Vertices[2] = BasePos + FVector(0, 0, QuadWorldSize.Y);
-                Vertices[3] = BasePos + FVector(QuadWorldSize.X, 0, QuadWorldSize.Y);
+                Vertices[2] = BasePos + FVector(0, 0, SizeVector.Z);
+                Vertices[3] = BasePos + FVector(SizeVector.X, 0, SizeVector.Z);
                 break;
                 
-            case EVoxelFace::Right: // +X
-                Vertices[0] = BasePos + FVector(VoxelSize, 0, 0);
-                Vertices[1] = BasePos + FVector(VoxelSize, QuadWorldSize.X, 0);
-                Vertices[2] = BasePos + FVector(VoxelSize, QuadWorldSize.X, QuadWorldSize.Y);
-                Vertices[3] = BasePos + FVector(VoxelSize, 0, QuadWorldSize.Y);
+            case EVoxelFace::Right: // +X (facing positive X)
+                Vertices[0] = BasePos + FVector(VoxelSize, SizeVector.Y, 0);
+                Vertices[1] = BasePos + FVector(VoxelSize, 0, 0);
+                Vertices[2] = BasePos + FVector(VoxelSize, 0, SizeVector.Z);
+                Vertices[3] = BasePos + FVector(VoxelSize, SizeVector.Y, SizeVector.Z);
                 break;
                 
-            case EVoxelFace::Left: // -X
-                Vertices[0] = BasePos + FVector(0, QuadWorldSize.X, 0);
-                Vertices[1] = BasePos + FVector(0, 0, 0);
-                Vertices[2] = BasePos + FVector(0, 0, QuadWorldSize.Y);
-                Vertices[3] = BasePos + FVector(0, QuadWorldSize.X, QuadWorldSize.Y);
+            case EVoxelFace::Left: // -X (facing negative X)
+                Vertices[0] = BasePos + FVector(0, 0, 0);
+                Vertices[1] = BasePos + FVector(0, SizeVector.Y, 0);
+                Vertices[2] = BasePos + FVector(0, SizeVector.Y, SizeVector.Z);
+                Vertices[3] = BasePos + FVector(0, 0, SizeVector.Z);
                 break;
                 
-            case EVoxelFace::Top: // +Z
+            case EVoxelFace::Top: // +Z (facing positive Z - up)
                 Vertices[0] = BasePos + FVector(0, 0, VoxelSize);
-                Vertices[1] = BasePos + FVector(QuadWorldSize.X, 0, VoxelSize);
-                Vertices[2] = BasePos + FVector(QuadWorldSize.X, QuadWorldSize.Y, VoxelSize);
-                Vertices[3] = BasePos + FVector(0, QuadWorldSize.Y, VoxelSize);
+                Vertices[1] = BasePos + FVector(SizeVector.X, 0, VoxelSize);
+                Vertices[2] = BasePos + FVector(SizeVector.X, SizeVector.Y, VoxelSize);
+                Vertices[3] = BasePos + FVector(0, SizeVector.Y, VoxelSize);
                 break;
                 
-            case EVoxelFace::Bottom: // -Z
-                Vertices[0] = BasePos + FVector(0, QuadWorldSize.Y, 0);
-                Vertices[1] = BasePos + FVector(QuadWorldSize.X, QuadWorldSize.Y, 0);
-                Vertices[2] = BasePos + FVector(QuadWorldSize.X, 0, 0);
+            case EVoxelFace::Bottom: // -Z (facing negative Z - down)
+                Vertices[0] = BasePos + FVector(0, SizeVector.Y, 0);
+                Vertices[1] = BasePos + FVector(SizeVector.X, SizeVector.Y, 0);
+                Vertices[2] = BasePos + FVector(SizeVector.X, 0, 0);
                 Vertices[3] = BasePos + FVector(0, 0, 0);
                 break;
         }
         
-        // Calculate UVs based on quad size
-        FVector2D UVs[4];
-        UVs[0] = FVector2D(0, 0);
-        UVs[1] = FVector2D(Quad.Size[UAxis], 0);
-        UVs[2] = FVector2D(Quad.Size[UAxis], Quad.Size[VAxis]);
-        UVs[3] = FVector2D(0, Quad.Size[VAxis]);
+        // Check for unreasonable vertex positions
+        if (QuadIndex < 5)
+        {
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Calculated vertices:"));
+            for (int32 i = 0; i < 4; i++)
+            {
+                UE_LOG(LogHearthshireVoxel, Warning, TEXT("    V%d: %s"), i, *Vertices[i].ToString());
+            }
+        }
         
-        // Add the quad to the mesh
-        FVoxelMeshGenerator::AddQuad(
-            OutMeshData,
-            Vertices[0], Vertices[1], Vertices[2], Vertices[3],
-            Normal,
-            UVs[0], UVs[1], UVs[2], UVs[3],
-            Quad.Material
-        );
+        // Validate vertex positions are reasonable
+        for (int32 i = 0; i < 4; i++)
+        {
+            float Distance = Vertices[i].Size();
+            if (Distance > 10000.0f) // More than 10000 units away
+            {
+                UE_LOG(LogHearthshireVoxel, Error, TEXT("UNREASONABLE VERTEX: Quad %d, Vertex %d at %s (Distance: %.1f)"),
+                    QuadIndex, i, *Vertices[i].ToString(), Distance);
+            }
+        }
+        
+        // Calculate tangent for the quad
+        FVector Edge1 = Vertices[1] - Vertices[0];
+        FVector Edge2 = Vertices[2] - Vertices[0];
+        FVector2D DeltaUV1 = FVector2D(Quad.Size.X, 0);      // U dimension
+        FVector2D DeltaUV2 = FVector2D(Quad.Size.X, Quad.Size.Y);  // U and V dimensions
+        
+        float Div = DeltaUV1.X * DeltaUV2.Y - DeltaUV2.X * DeltaUV1.Y;
+        FVector Tangent = FVector::ZeroVector;
+        
+        if (!FMath::IsNearlyZero(Div))
+        {
+            float InvDiv = 1.0f / Div;
+            Tangent = (Edge1 * DeltaUV2.Y - Edge2 * DeltaUV1.Y) * InvDiv;
+            Tangent.Normalize();
+        }
+        
+        FProcMeshTangent ProcTangent(Tangent, false);
+        FColor OpaqueWhite(255, 255, 255, 255);
+        
+        // Get or create vertex indices for each corner
+        int32 VertexIndices[4];
+        for (int32 i = 0; i < 4; i++)
+        {
+            FVertexKey Key(Vertices[i]);
+            
+            // Check if vertex already exists
+            int32* ExistingIndex = VertexMap.Find(Key);
+            
+            if (ExistingIndex)
+            {
+                // Reuse existing vertex
+                VertexIndices[i] = *ExistingIndex;
+                DuplicateVerticesSaved++;
+            }
+            else
+            {
+                // Create new vertex
+                int32 NewIndex = OutMeshData.Vertices.Num();
+                VertexIndices[i] = NewIndex;
+                VertexMap.Add(Key, NewIndex);
+                
+                // Log vertex positions for first few quads
+                if (QuadIndex < 5)
+                {
+                    UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Vertex %d (Index %d): %s"), 
+                        i, NewIndex, *Vertices[i].ToString());
+                }
+                
+                // Add vertex data
+                OutMeshData.Vertices.Add(Vertices[i]);
+                OutMeshData.Normals.Add(Normal);
+                OutMeshData.VertexColors.Add(OpaqueWhite);
+                OutMeshData.Tangents.Add(ProcTangent);
+                
+                // Calculate UVs based on world position
+                FVector2D UV = FVector2D::ZeroVector; // Initialize to zero
+                switch (Quad.Face)
+                {
+                    case EVoxelFace::Front: // +Y
+                    case EVoxelFace::Back:  // -Y
+                        UV.X = Vertices[i].X / VoxelSize;
+                        UV.Y = Vertices[i].Z / VoxelSize;
+                        break;
+                    case EVoxelFace::Right: // +X
+                    case EVoxelFace::Left:  // -X
+                        UV.X = Vertices[i].Y / VoxelSize;
+                        UV.Y = Vertices[i].Z / VoxelSize;
+                        break;
+                    case EVoxelFace::Top:    // +Z
+                    case EVoxelFace::Bottom: // -Z
+                        UV.X = Vertices[i].X / VoxelSize;
+                        UV.Y = Vertices[i].Y / VoxelSize;
+                        break;
+                    default:
+                        // Should never happen, but handle it to avoid warning
+                        UV.X = 0.0f;
+                        UV.Y = 0.0f;
+                        break;
+                }
+                
+                // Normalize to 0-1 range for tiling
+                UV.X = FMath::Fmod(UV.X, 1.0f);
+                UV.Y = FMath::Fmod(UV.Y, 1.0f);
+                if (UV.X < 0) UV.X += 1.0f;
+                if (UV.Y < 0) UV.Y += 1.0f;
+                
+                OutMeshData.UV0.Add(UV);
+            }
+        }
+        
+        // Log triangle indices for first few quads
+        if (QuadIndex < 5)
+        {
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Triangle 1: %d, %d, %d"), 
+                VertexIndices[0], VertexIndices[1], VertexIndices[2]);
+            UE_LOG(LogHearthshireVoxel, Warning, TEXT("  Triangle 2: %d, %d, %d"), 
+                VertexIndices[0], VertexIndices[2], VertexIndices[3]);
+        }
+        
+        // Validate indices before adding
+        int32 MaxIndex = OutMeshData.Vertices.Num();
+        for (int32 i = 0; i < 4; i++)
+        {
+            if (VertexIndices[i] >= MaxIndex || VertexIndices[i] < 0)
+            {
+                UE_LOG(LogHearthshireVoxel, Error, TEXT("INVALID VERTEX INDEX: Quad %d, Vertex %d, Index %d (Max: %d)"),
+                    QuadIndex, i, VertexIndices[i], MaxIndex - 1);
+            }
+        }
+        
+        // Add triangles with correct winding order
+        // First triangle: 0-1-2
+        OutMeshData.Triangles.Add(VertexIndices[0]);
+        OutMeshData.Triangles.Add(VertexIndices[1]);
+        OutMeshData.Triangles.Add(VertexIndices[2]);
+        
+        // Second triangle: 0-2-3
+        OutMeshData.Triangles.Add(VertexIndices[0]);
+        OutMeshData.Triangles.Add(VertexIndices[2]);
+        OutMeshData.Triangles.Add(VertexIndices[3]);
+        
+        // Add material section mapping
+        int32 SectionIndex = FVoxelMeshGenerator::GetOrCreateMaterialSection(OutMeshData, Quad.Material);
+        
+        QuadIndex++;
     }
     
     // Update mesh statistics
     OutMeshData.TriangleCount = OutMeshData.Triangles.Num() / 3;
     OutMeshData.VertexCount = OutMeshData.Vertices.Num();
+    
+    // CRITICAL DEBUG: Log the actual counts
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("ConvertQuadsToMesh FINAL: Triangles array size: %d, TriangleCount: %d, VertexCount: %d"),
+        OutMeshData.Triangles.Num(), OutMeshData.TriangleCount, OutMeshData.VertexCount);
+    
+    // Validate all triangle indices
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("Validating triangle indices..."));
+    int32 InvalidIndexCount = 0;
+    for (int32 i = 0; i < OutMeshData.Triangles.Num(); i++)
+    {
+        if (OutMeshData.Triangles[i] >= OutMeshData.Vertices.Num() || OutMeshData.Triangles[i] < 0)
+        {
+            InvalidIndexCount++;
+            UE_LOG(LogHearthshireVoxel, Error, TEXT("Invalid triangle index at position %d: %d (Max allowed: %d)"),
+                i, OutMeshData.Triangles[i], OutMeshData.Vertices.Num() - 1);
+        }
+    }
+    
+    if (InvalidIndexCount > 0)
+    {
+        UE_LOG(LogHearthshireVoxel, Error, TEXT("CRITICAL: Found %d invalid triangle indices!"), InvalidIndexCount);
+    }
+    
+    // Check for vertex position outliers
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("Checking vertex positions for outliers..."));
+    float MaxReasonableDistance = 1000.0f * VoxelSize; // 1000 voxels max distance
+    int32 OutlierCount = 0;
+    
+    for (int32 i = 0; i < OutMeshData.Vertices.Num(); i++)
+    {
+        const FVector& Vertex = OutMeshData.Vertices[i];
+        float Distance = Vertex.Size();
+        
+        if (Distance > MaxReasonableDistance)
+        {
+            OutlierCount++;
+            if (OutlierCount <= 5) // Log first 5 outliers
+            {
+                UE_LOG(LogHearthshireVoxel, Error, TEXT("Vertex %d is an outlier: %s (Distance: %.1f)"),
+                    i, *Vertex.ToString(), Distance);
+            }
+        }
+    }
+    
+    if (OutlierCount > 0)
+    {
+        UE_LOG(LogHearthshireVoxel, Error, TEXT("Found %d vertex position outliers!"), OutlierCount);
+    }
+    
+    // Log vertex welding statistics
+    float VerticesPerQuad = OutMeshData.Vertices.Num() > 0 ? 
+        (float)OutMeshData.Vertices.Num() / (float)Quads.Num() : 0.0f;
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("ConvertQuadsToMesh: Created %d unique vertices from %d quads (%.2f vertices/quad)"), 
+        OutMeshData.Vertices.Num(), Quads.Num(), VerticesPerQuad);
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("  Vertex welding saved %d duplicate vertices (%.1f%% reduction)"),
+        DuplicateVerticesSaved, 
+        DuplicateVerticesSaved > 0 ? (100.0f * DuplicateVerticesSaved / (DuplicateVerticesSaved + OutMeshData.Vertices.Num())) : 0.0f);
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("=== ConvertQuadsToMesh END ==="));
 }
 
 float FVoxelGreedyMesher::CalculateReductionPercent(

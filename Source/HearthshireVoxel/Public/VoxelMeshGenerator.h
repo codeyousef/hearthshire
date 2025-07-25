@@ -77,6 +77,9 @@ public:
         EVoxelFace Face
     );
     
+    // Material section management - made public for greedy mesher
+    static int32 GetOrCreateMaterialSection(FVoxelMeshData& MeshData, EVoxelMaterial Material);
+    
 private:
     // Face generation helpers
     static void AddFace(
@@ -106,9 +109,6 @@ private:
     
     // Face direction helpers
     static FIntVector GetFaceDirection(EVoxelFace Face);
-    
-    // Material section management
-    static int32 GetOrCreateMaterialSection(FVoxelMeshData& MeshData, EVoxelMaterial Material);
     
     // Optimization helpers
     static void OptimizeMeshData(FVoxelMeshData& MeshData);

@@ -418,3 +418,365 @@ void UVoxelBlueprintLibrary::DrawDebugChunk(
     
     DrawDebugBox(World, Center, ChunkExtent, Color.ToFColor(true), false, Duration, 0, 2.0f);
 }
+
+void UVoxelBlueprintLibrary::SetVoxelCylinder(
+    AVoxelWorld* VoxelWorld,
+    const FVector& Base,
+    const FVector& Direction,
+    float Radius,
+    float Height,
+    EVoxelMaterial Material)
+{
+    if (!VoxelWorld)
+    {
+        return;
+    }
+    
+    const float VoxelSize = GetVoxelSize();
+    FVector NormalizedDir = Direction.GetSafeNormal();
+    
+    // Calculate bounding box for the cylinder
+    FVector CylinderEnd = Base + NormalizedDir * Height;
+    FVector RadiusVector = FVector(Radius);
+    
+    FVector MinBounds = FVector::Min(Base - RadiusVector, CylinderEnd - RadiusVector);
+    FVector MaxBounds = FVector::Max(Base + RadiusVector, CylinderEnd + RadiusVector);
+    
+    FIntVector MinVoxel = WorldToVoxelPosition(MinBounds, VoxelSize);
+    FIntVector MaxVoxel = WorldToVoxelPosition(MaxBounds, VoxelSize);
+    
+    // Set voxels within cylinder
+    for (int32 X = MinVoxel.X; X <= MaxVoxel.X; X++)
+    {
+        for (int32 Y = MinVoxel.Y; Y <= MaxVoxel.Y; Y++)
+        {
+            for (int32 Z = MinVoxel.Z; Z <= MaxVoxel.Z; Z++)
+            {
+                FVector VoxelWorldPos = VoxelToWorldPosition(FIntVector(X, Y, Z), VoxelSize) + FVector(VoxelSize * 0.5f);
+                
+                // Project point onto cylinder axis
+                FVector ToPoint = VoxelWorldPos - Base;
+                float ProjectedDist = FVector::DotProduct(ToPoint, NormalizedDir);
+                
+                // Check if within cylinder height
+                if (ProjectedDist >= 0 && ProjectedDist <= Height)
+                {
+                    // Calculate distance from axis
+                    FVector PointOnAxis = Base + NormalizedDir * ProjectedDist;
+                    float DistFromAxis = FVector::Dist(VoxelWorldPos, PointOnAxis);
+                    
+                    if (DistFromAxis <= Radius)
+                    {
+                        VoxelWorld->SetVoxel(VoxelWorldPos, Material);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void UVoxelBlueprintLibrary::SetVoxelCone(
+    AVoxelWorld* VoxelWorld,
+    const FVector& Base,
+    const FVector& Direction,
+    float BaseRadius,
+    float Height,
+    EVoxelMaterial Material)
+{
+    if (!VoxelWorld)
+    {
+        return;
+    }
+    
+    const float VoxelSize = GetVoxelSize();
+    FVector NormalizedDir = Direction.GetSafeNormal();
+    
+    // Calculate bounding box for the cone
+    FVector ConeTop = Base + NormalizedDir * Height;
+    FVector RadiusVector = FVector(BaseRadius);
+    
+    FVector MinBounds = FVector::Min(Base - RadiusVector, ConeTop);
+    FVector MaxBounds = FVector::Max(Base + RadiusVector, ConeTop);
+    
+    FIntVector MinVoxel = WorldToVoxelPosition(MinBounds, VoxelSize);
+    FIntVector MaxVoxel = WorldToVoxelPosition(MaxBounds, VoxelSize);
+    
+    // Set voxels within cone
+    for (int32 X = MinVoxel.X; X <= MaxVoxel.X; X++)
+    {
+        for (int32 Y = MinVoxel.Y; Y <= MaxVoxel.Y; Y++)
+        {
+            for (int32 Z = MinVoxel.Z; Z <= MaxVoxel.Z; Z++)
+            {
+                FVector VoxelWorldPos = VoxelToWorldPosition(FIntVector(X, Y, Z), VoxelSize) + FVector(VoxelSize * 0.5f);
+                
+                // Project point onto cone axis
+                FVector ToPoint = VoxelWorldPos - Base;
+                float ProjectedDist = FVector::DotProduct(ToPoint, NormalizedDir);
+                
+                // Check if within cone height
+                if (ProjectedDist >= 0 && ProjectedDist <= Height)
+                {
+                    // Calculate radius at this height
+                    float RadiusAtHeight = BaseRadius * (1.0f - ProjectedDist / Height);
+                    
+                    // Calculate distance from axis
+                    FVector PointOnAxis = Base + NormalizedDir * ProjectedDist;
+                    float DistFromAxis = FVector::Dist(VoxelWorldPos, PointOnAxis);
+                    
+                    if (DistFromAxis <= RadiusAtHeight)
+                    {
+                        VoxelWorld->SetVoxel(VoxelWorldPos, Material);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TArray<FVoxel> UVoxelBlueprintLibrary::CopyVoxelRegion(
+    const AVoxelWorld* VoxelWorld,
+    const FVector& MinCorner,
+    const FVector& MaxCorner)
+{
+    TArray<FVoxel> Result;
+    
+    if (!VoxelWorld)
+    {
+        return Result;
+    }
+    
+    const float VoxelSize = GetVoxelSize();
+    
+    FIntVector MinVoxel = WorldToVoxelPosition(MinCorner, VoxelSize);
+    FIntVector MaxVoxel = WorldToVoxelPosition(MaxCorner, VoxelSize);
+    
+    // Ensure proper ordering
+    FIntVector ActualMin(
+        FMath::Min(MinVoxel.X, MaxVoxel.X),
+        FMath::Min(MinVoxel.Y, MaxVoxel.Y),
+        FMath::Min(MinVoxel.Z, MaxVoxel.Z)
+    );
+    
+    FIntVector ActualMax(
+        FMath::Max(MinVoxel.X, MaxVoxel.X),
+        FMath::Max(MinVoxel.Y, MaxVoxel.Y),
+        FMath::Max(MinVoxel.Z, MaxVoxel.Z)
+    );
+    
+    FIntVector Size = ActualMax - ActualMin + FIntVector(1);
+    Result.Reserve(Size.X * Size.Y * Size.Z);
+    
+    // Copy voxels in order
+    for (int32 Z = ActualMin.Z; Z <= ActualMax.Z; Z++)
+    {
+        for (int32 Y = ActualMin.Y; Y <= ActualMax.Y; Y++)
+        {
+            for (int32 X = ActualMin.X; X <= ActualMax.X; X++)
+            {
+                FVector VoxelWorldPos = VoxelToWorldPosition(FIntVector(X, Y, Z), VoxelSize);
+                EVoxelMaterial Material = VoxelWorld->GetVoxel(VoxelWorldPos);
+                Result.Add(FVoxel(Material));
+            }
+        }
+    }
+    
+    return Result;
+}
+
+void UVoxelBlueprintLibrary::PasteVoxelRegion(
+    AVoxelWorld* VoxelWorld,
+    const FVector& Position,
+    const TArray<FVoxel>& VoxelData,
+    const FIntVector& DataSize)
+{
+    if (!VoxelWorld || VoxelData.Num() == 0)
+    {
+        return;
+    }
+    
+    const float VoxelSize = GetVoxelSize();
+    FIntVector BaseVoxel = WorldToVoxelPosition(Position, VoxelSize);
+    
+    int32 Index = 0;
+    for (int32 Z = 0; Z < DataSize.Z && Index < VoxelData.Num(); Z++)
+    {
+        for (int32 Y = 0; Y < DataSize.Y && Index < VoxelData.Num(); Y++)
+        {
+            for (int32 X = 0; X < DataSize.X && Index < VoxelData.Num(); X++)
+            {
+                FIntVector VoxelPos = BaseVoxel + FIntVector(X, Y, Z);
+                FVector VoxelWorldPos = VoxelToWorldPosition(VoxelPos, VoxelSize);
+                VoxelWorld->SetVoxel(VoxelWorldPos, VoxelData[Index].Material);
+                Index++;
+            }
+        }
+    }
+}
+
+float UVoxelBlueprintLibrary::GetVoxelDensityInRegion(
+    const AVoxelWorld* VoxelWorld,
+    const FVector& MinCorner,
+    const FVector& MaxCorner)
+{
+    if (!VoxelWorld)
+    {
+        return 0.0f;
+    }
+    
+    const float VoxelSize = GetVoxelSize();
+    
+    FIntVector MinVoxel = WorldToVoxelPosition(MinCorner, VoxelSize);
+    FIntVector MaxVoxel = WorldToVoxelPosition(MaxCorner, VoxelSize);
+    
+    // Ensure proper ordering
+    FIntVector ActualMin(
+        FMath::Min(MinVoxel.X, MaxVoxel.X),
+        FMath::Min(MinVoxel.Y, MaxVoxel.Y),
+        FMath::Min(MinVoxel.Z, MaxVoxel.Z)
+    );
+    
+    FIntVector ActualMax(
+        FMath::Max(MinVoxel.X, MaxVoxel.X),
+        FMath::Max(MinVoxel.Y, MaxVoxel.Y),
+        FMath::Max(MinVoxel.Z, MaxVoxel.Z)
+    );
+    
+    int32 TotalVoxels = 0;
+    int32 SolidVoxels = 0;
+    
+    for (int32 X = ActualMin.X; X <= ActualMax.X; X++)
+    {
+        for (int32 Y = ActualMin.Y; Y <= ActualMax.Y; Y++)
+        {
+            for (int32 Z = ActualMin.Z; Z <= ActualMax.Z; Z++)
+            {
+                FVector VoxelWorldPos = VoxelToWorldPosition(FIntVector(X, Y, Z), VoxelSize);
+                EVoxelMaterial Material = VoxelWorld->GetVoxel(VoxelWorldPos);
+                
+                TotalVoxels++;
+                if (Material != EVoxelMaterial::Air)
+                {
+                    SolidVoxels++;
+                }
+            }
+        }
+    }
+    
+    return TotalVoxels > 0 ? (float)SolidVoxels / (float)TotalVoxels : 0.0f;
+}
+
+TArray<FIntVector> UVoxelBlueprintLibrary::FindConnectedVoxels(
+    const AVoxelWorld* VoxelWorld,
+    const FVector& StartPosition,
+    EVoxelMaterial TargetMaterial,
+    int32 MaxResults)
+{
+    TArray<FIntVector> Result;
+    
+    if (!VoxelWorld)
+    {
+        return Result;
+    }
+    
+    const float VoxelSize = GetVoxelSize();
+    FIntVector StartVoxel = WorldToVoxelPosition(StartPosition, VoxelSize);
+    
+    // Check if start voxel matches target material
+    EVoxelMaterial StartMaterial = VoxelWorld->GetVoxel(VoxelToWorldPosition(StartVoxel, VoxelSize));
+    if (StartMaterial != TargetMaterial)
+    {
+        return Result;
+    }
+    
+    // Flood fill algorithm
+    TSet<FIntVector> Visited;
+    TQueue<FIntVector> ToProcess;
+    
+    ToProcess.Enqueue(StartVoxel);
+    Visited.Add(StartVoxel);
+    
+    const TArray<FIntVector> Neighbors = {
+        FIntVector(1, 0, 0), FIntVector(-1, 0, 0),
+        FIntVector(0, 1, 0), FIntVector(0, -1, 0),
+        FIntVector(0, 0, 1), FIntVector(0, 0, -1)
+    };
+    
+    while (!ToProcess.IsEmpty() && Result.Num() < MaxResults)
+    {
+        FIntVector Current;
+        ToProcess.Dequeue(Current);
+        Result.Add(Current);
+        
+        // Check all neighbors
+        for (const FIntVector& Offset : Neighbors)
+        {
+            FIntVector Neighbor = Current + Offset;
+            
+            if (!Visited.Contains(Neighbor))
+            {
+                Visited.Add(Neighbor);
+                
+                FVector NeighborWorldPos = VoxelToWorldPosition(Neighbor, VoxelSize);
+                EVoxelMaterial NeighborMaterial = VoxelWorld->GetVoxel(NeighborWorldPos);
+                
+                if (NeighborMaterial == TargetMaterial)
+                {
+                    ToProcess.Enqueue(Neighbor);
+                }
+            }
+        }
+    }
+    
+    return Result;
+}
+
+void UVoxelBlueprintLibrary::DrawDebugVoxelRegion(
+    UObject* WorldContextObject,
+    const FVector& MinCorner,
+    const FVector& MaxCorner,
+    const FLinearColor& Color,
+    float Duration,
+    float Thickness)
+{
+    UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+    if (!World)
+    {
+        return;
+    }
+    
+    FVector Center = (MinCorner + MaxCorner) * 0.5f;
+    FVector Extent = (MaxCorner - MinCorner) * 0.5f;
+    
+    DrawDebugBox(World, Center, Extent, Color.ToFColor(true), false, Duration, 0, Thickness);
+}
+
+void UVoxelBlueprintLibrary::HighlightModifiedChunks(
+    AVoxelWorld* VoxelWorld,
+    const FLinearColor& Color,
+    float Duration)
+{
+    if (!VoxelWorld || !VoxelWorld->GetWorld())
+    {
+        return;
+    }
+    
+    UWorld* World = VoxelWorld->GetWorld();
+    const float ChunkWorldSize = VoxelWorld->Config.ChunkSize * GetVoxelSize();
+    
+    for (const auto& ChunkPair : VoxelWorld->ActiveChunks)
+    {
+        if (ChunkPair.Value && ChunkPair.Value->ChunkComponent)
+        {
+            UVoxelChunkComponent* ChunkComp = ChunkPair.Value->ChunkComponent;
+            
+            // Check if chunk has been modified (you might want to track this separately)
+            // For now, highlight all active chunks
+            FVector ChunkWorldPos = FVector(ChunkPair.Key) * ChunkWorldSize;
+            FVector ChunkCenter = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f);
+            FVector ChunkExtent = FVector(ChunkWorldSize * 0.5f);
+            
+            DrawDebugBox(World, ChunkCenter, ChunkExtent, Color.ToFColor(true), false, Duration, 0, 3.0f);
+        }
+    }
+}

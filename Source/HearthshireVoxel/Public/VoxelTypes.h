@@ -316,6 +316,117 @@ struct HEARTHSHIREVOXEL_API FVoxelLODConfig
 };
 
 /**
+ * Debug visualization configuration
+ */
+USTRUCT(BlueprintType)
+struct HEARTHSHIREVOXEL_API FVoxelDebugConfig
+{
+    GENERATED_BODY()
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (DisplayName = "Show Chunk Bounds"))
+    bool bShowChunkBounds;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (DisplayName = "Show Voxel Grid"))
+    bool bShowVoxelGrid;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (DisplayName = "Show Performance Stats"))
+    bool bShowPerformanceStats;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (DisplayName = "Show LOD Info"))
+    bool bShowLODInfo;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (DisplayName = "Debug Color", HideAlphaChannel))
+    FLinearColor DebugColor;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "1", ClampMax = "16", DisplayName = "Grid Step Size"))
+    int32 GridStepSize;
+    
+    FVoxelDebugConfig()
+    {
+        bShowChunkBounds = false;
+        bShowVoxelGrid = false;
+        bShowPerformanceStats = false;
+        bShowLODInfo = false;
+        DebugColor = FLinearColor::Green;
+        GridStepSize = 4;
+    }
+};
+
+/**
+ * Optimization configuration
+ */
+USTRUCT(BlueprintType)
+struct HEARTHSHIREVOXEL_API FVoxelOptimizationConfig
+{
+    GENERATED_BODY()
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (DisplayName = "Enable Greedy Meshing"))
+    bool bUseGreedyMeshing;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (DisplayName = "Enable Multithreading"))
+    bool bUseMultithreading;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (DisplayName = "Enable Async Mesh Generation"))
+    bool bUseAsyncGeneration;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (DisplayName = "Enable Index Optimization"))
+    bool bOptimizeIndices;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (ClampMin = "1", ClampMax = "8", DisplayName = "Worker Thread Count"))
+    int32 WorkerThreadCount;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (ClampMin = "1", ClampMax = "10", DisplayName = "Chunks Per Frame"))
+    int32 MaxChunksPerFrame;
+    
+    FVoxelOptimizationConfig()
+    {
+        bUseGreedyMeshing = true;
+        bUseMultithreading = true;
+        bUseAsyncGeneration = true;
+        bOptimizeIndices = true;
+        WorkerThreadCount = 4;
+        MaxChunksPerFrame = 5;
+    }
+};
+
+/**
+ * Terrain generation configuration
+ */
+USTRUCT(BlueprintType)
+struct HEARTHSHIREVOXEL_API FVoxelGenerationConfig
+{
+    GENERATED_BODY()
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (DisplayName = "Terrain Type"))
+    FName TerrainPreset;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (ClampMin = "0.001", ClampMax = "1.0", DisplayName = "Noise Scale"))
+    float NoiseScale;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (ClampMin = "1", ClampMax = "100", DisplayName = "Height Scale"))
+    float HeightScale;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (ClampMin = "1", ClampMax = "8", DisplayName = "Octaves"))
+    int32 Octaves;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (DisplayName = "Seed"))
+    int32 Seed;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (DisplayName = "Base Height"))
+    int32 BaseHeight;
+    
+    FVoxelGenerationConfig()
+    {
+        TerrainPreset = "Default";
+        NoiseScale = 0.01f;
+        HeightScale = 50.0f;
+        Octaves = 4;
+        Seed = 12345;
+        BaseHeight = 10;
+    }
+};
+
+/**
  * Performance statistics
  */
 USTRUCT(BlueprintType)

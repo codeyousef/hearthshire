@@ -7,6 +7,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "HearthshireVoxelModule.h"
 #include "Async/ParallelFor.h"
+#include "VoxelPerformanceTest.h"
+#include "VoxelBlueprintLibrary.h"
 
 AVoxelWorld::AVoxelWorld()
 {
@@ -50,6 +52,8 @@ void AVoxelWorld::BeginPlay()
     }
     
     UE_LOG(LogHearthshireVoxel, Log, TEXT("VoxelWorld initialized with %d pooled chunks"), ChunkPool.Num());
+    
+    OnWorldInitialized.Broadcast();
 }
 
 void AVoxelWorld::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -470,6 +474,14 @@ void AVoxelWorld::EnforceMemoryBudget()
         UE_LOG(LogHearthshireVoxel, Warning, TEXT("Memory usage (%.1fMB) exceeds budget (%.1fMB). Unloading distant chunks."),
             CurrentMemoryMB, MemoryBudget);
         
+        // Broadcast event only on first time exceeding
+        static bool bWasUnderBudget = true;
+        if (bWasUnderBudget)
+        {
+            OnMemoryBudgetExceeded.Broadcast();
+            bWasUnderBudget = false;
+        }
+        
         // Sort chunks by distance from player and unload furthest
         TArray<TPair<float, FIntVector>> ChunkDistances;
         FVector PlayerPos = TrackedPlayer ? TrackedPlayer->GetActorLocation() : FVector::ZeroVector;
@@ -492,6 +504,12 @@ void AVoxelWorld::EnforceMemoryBudget()
         {
             UnloadChunk(ChunkDistances[i].Value);
         }
+    }
+    else
+    {
+        // Reset the flag when we're back under budget
+        static bool bWasUnderBudget = true;
+        bWasUnderBudget = true;
     }
 }
 
@@ -527,6 +545,8 @@ void AVoxelWorld::QueueChunkGeneration(const FIntVector& ChunkPosition, int32 Pr
     
     FScopeLock Lock(&TaskQueueLock);
     ChunkTaskQueue.Enqueue(Task);
+    
+    OnChunkGenerationQueued.Broadcast(ChunkPosition, Priority);
 }
 
 bool AVoxelWorld::ShouldLoadChunk(const FIntVector& ChunkPosition) const
@@ -571,6 +591,92 @@ void AVoxelWorld::OnChunkGenerated(UVoxelChunkComponent* ChunkComponent)
         WorldStats.MeshGenerationTimeMs = FMath::Max(WorldStats.MeshGenerationTimeMs, ChunkStats.MeshGenerationTimeMs);
         WorldStats.GreedyMeshingTimeMs = FMath::Max(WorldStats.GreedyMeshingTimeMs, ChunkStats.GreedyMeshingTimeMs);
     }
+}
+
+TArray<AVoxelChunk*> AVoxelWorld::GetAllActiveChunks() const
+{
+    TArray<AVoxelChunk*> Result;
+    Result.Reserve(ActiveChunks.Num());
+    
+    for (const auto& ChunkPair : ActiveChunks)
+    {
+        if (ChunkPair.Value)
+        {
+            Result.Add(ChunkPair.Value);
+        }
+    }
+    
+    return Result;
+}
+
+void AVoxelWorld::UnloadAllChunks()
+{
+    TArray<FIntVector> ChunkPositions;
+    ActiveChunks.GetKeys(ChunkPositions);
+    
+    for (const FIntVector& Position : ChunkPositions)
+    {
+        UnloadChunk(Position);
+    }
+}
+
+void AVoxelWorld::SetMemoryBudget(int32 NewBudgetMB)
+{
+#if VOXEL_MOBILE_PLATFORM
+    Config.MobileMemoryBudgetMB = NewBudgetMB;
+#else
+    Config.PCMemoryBudgetMB = NewBudgetMB;
+#endif
+    
+    // Immediately enforce new budget
+    UpdateMemoryUsage();
+    EnforceMemoryBudget();
+}
+
+AVoxelChunk* AVoxelWorld::GetChunkAtPosition(const FIntVector& ChunkPosition) const
+{
+    if (AVoxelChunk* const* ChunkPtr = ActiveChunks.Find(ChunkPosition))
+    {
+        return *ChunkPtr;
+    }
+    return nullptr;
+}
+
+void AVoxelWorld::GenerateTestTerrain()
+{
+    // Generate a 5x5 grid of chunks around origin
+    const int32 GridSize = 5;
+    const int32 HalfGrid = GridSize / 2;
+    
+    for (int32 X = -HalfGrid; X <= HalfGrid; X++)
+    {
+        for (int32 Y = -HalfGrid; Y <= HalfGrid; Y++)
+        {
+            FIntVector ChunkPos(X, Y, 0);
+            GetOrCreateChunk(ChunkPos);
+        }
+    }
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("Generated test terrain with %d chunks"), GridSize * GridSize);
+}
+
+void AVoxelWorld::ClearAllVoxels()
+{
+    for (const auto& ChunkPair : ActiveChunks)
+    {
+        if (ChunkPair.Value && ChunkPair.Value->ChunkComponent)
+        {
+            ChunkPair.Value->ClearAllVoxels();
+        }
+    }
+}
+
+void AVoxelWorld::RunPerformanceTest()
+{
+    TArray<FVoxelTestResult> Results = UVoxelPerformanceTest::RunAllPerformanceTests(this);
+    FString Report = UVoxelPerformanceTest::GenerateTestReport(Results);
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("Performance Test Results:\n%s"), *Report);
 }
 
 // UVoxelWorldComponent Implementation

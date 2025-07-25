@@ -62,6 +62,42 @@ public:
         EVoxelMaterial Material
     );
     
+    // Additional batch operations
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Manipulation", meta = (DisplayName = "Set Voxel Cylinder"))
+    static void SetVoxelCylinder(
+        AVoxelWorld* VoxelWorld,
+        const FVector& Base,
+        const FVector& Direction,
+        float Radius,
+        float Height,
+        EVoxelMaterial Material
+    );
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Manipulation", meta = (DisplayName = "Set Voxel Cone"))
+    static void SetVoxelCone(
+        AVoxelWorld* VoxelWorld,
+        const FVector& Base,
+        const FVector& Direction,
+        float BaseRadius,
+        float Height,
+        EVoxelMaterial Material
+    );
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Manipulation", meta = (DisplayName = "Copy Voxel Region"))
+    static TArray<FVoxel> CopyVoxelRegion(
+        const AVoxelWorld* VoxelWorld,
+        const FVector& MinCorner,
+        const FVector& MaxCorner
+    );
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Manipulation", meta = (DisplayName = "Paste Voxel Region"))
+    static void PasteVoxelRegion(
+        AVoxelWorld* VoxelWorld,
+        const FVector& Position,
+        const TArray<FVoxel>& VoxelData,
+        const FIntVector& DataSize
+    );
+    
     // Chunk management
     UFUNCTION(BlueprintCallable, Category = "Voxel|Chunks")
     static AVoxelChunk* GetChunkAtWorldPosition(
@@ -175,5 +211,39 @@ public:
         float VoxelSize = 25.0f,
         const FLinearColor& Color = FLinearColor::Green,
         float Duration = 0.0f
+    );
+    
+    // Analysis functions
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Analysis", meta = (DisplayName = "Get Voxel Density In Region"))
+    static float GetVoxelDensityInRegion(
+        const AVoxelWorld* VoxelWorld,
+        const FVector& MinCorner,
+        const FVector& MaxCorner
+    );
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Analysis", meta = (DisplayName = "Find Connected Voxels"))
+    static TArray<FIntVector> FindConnectedVoxels(
+        const AVoxelWorld* VoxelWorld,
+        const FVector& StartPosition,
+        EVoxelMaterial TargetMaterial,
+        int32 MaxResults = 1000
+    );
+    
+    // Visualization helpers
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Debug", meta = (WorldContext = "WorldContextObject", DisplayName = "Draw Debug Voxel Region"))
+    static void DrawDebugVoxelRegion(
+        UObject* WorldContextObject,
+        const FVector& MinCorner,
+        const FVector& MaxCorner,
+        const FLinearColor& Color = FLinearColor::Yellow,
+        float Duration = 0.0f,
+        float Thickness = 2.0f
+    );
+    
+    UFUNCTION(BlueprintCallable, Category = "Voxel|Debug", meta = (DisplayName = "Highlight Modified Chunks"))
+    static void HighlightModifiedChunks(
+        AVoxelWorld* VoxelWorld,
+        const FLinearColor& Color = FLinearColor::Red,
+        float Duration = 5.0f
     );
 };

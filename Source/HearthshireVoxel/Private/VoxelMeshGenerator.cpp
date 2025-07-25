@@ -4,6 +4,7 @@
 #include "VoxelGreedyMesher.h"
 #include "VoxelPerformanceStats.h"
 #include "ProceduralMeshComponent.h"
+#include "Logging/LogMacros.h"
 #include "HearthshireVoxelModule.h"
 
 // FVoxelMeshGenerator Implementation
@@ -25,6 +26,12 @@ void FVoxelMeshGenerator::GenerateBasicMesh(
     const int32 MaxFaces = ChunkData.ChunkSize.GetVoxelCount() * 6;
     OutMeshData.Reserve(MaxFaces * 4, MaxFaces * 6);
     
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateBasicMesh: Starting basic mesh generation for chunk %s"),
+        *ChunkData.ChunkPosition.ToString());
+    
+    int32 SolidVoxelCount = 0;
+    int32 FacesGenerated = 0;
+    
     // Iterate through all voxels
     for (int32 Z = 0; Z < ChunkData.ChunkSize.Z; Z++)
     {
@@ -40,6 +47,7 @@ void FVoxelMeshGenerator::GenerateBasicMesh(
                     continue;
                 }
                 
+                SolidVoxelCount++;
                 const FVector Position = FVector(X, Y, Z) * Config.VoxelSize;
                 
                 // Check each face
@@ -50,11 +58,15 @@ void FVoxelMeshGenerator::GenerateBasicMesh(
                     if (IsFaceVisible(ChunkData, X, Y, Z, Face))
                     {
                         AddFace(OutMeshData, Position, Face, Voxel.Material, Config.VoxelSize);
+                        FacesGenerated++;
                     }
                 }
             }
         }
     }
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("GenerateBasicMesh: Solid voxels: %d, Faces generated: %d"), 
+        SolidVoxelCount, FacesGenerated);
     
     // Post-processing
     if (Config.bOptimizeIndices)
@@ -91,6 +103,9 @@ void FVoxelMeshGenerator::GenerateGreedyMesh(
     // Convert quads to mesh
     FVoxelGreedyMesher::ConvertQuadsToMesh(Quads, OutMeshData, Config.VoxelSize);
     
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("GenerateGreedyMesh after ConvertQuadsToMesh: Triangles array: %d"), 
+        OutMeshData.Triangles.Num());
+    
     // Post-processing
     if (Config.bGenerateTangents)
     {
@@ -101,6 +116,9 @@ void FVoxelMeshGenerator::GenerateGreedyMesh(
     OutMeshData.TriangleCount = OutMeshData.Triangles.Num() / 3;
     OutMeshData.VertexCount = OutMeshData.Vertices.Num();
     OutMeshData.GenerationTimeMs = (FPlatformTime::Seconds() - StartTime) * 1000.0f;
+    
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("GenerateGreedyMesh FINAL: Triangles array: %d, TriangleCount: %d"), 
+        OutMeshData.Triangles.Num(), OutMeshData.TriangleCount);
 }
 
 void FVoxelMeshGenerator::GenerateLODMesh(
@@ -121,6 +139,7 @@ void FVoxelMeshGenerator::ApplyMeshToComponent(
 {
     if (!Component)
     {
+        UE_LOG(LogHearthshireVoxel, Error, TEXT("ApplyMeshToComponent: Component is null"));
         return;
     }
     
@@ -128,41 +147,113 @@ void FVoxelMeshGenerator::ApplyMeshToComponent(
     
     if (MeshData.Vertices.Num() == 0)
     {
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("ApplyMeshToComponent: No vertices to apply"));
         return;
     }
     
-    // Create mesh sections by material
-    for (const auto& MaterialSection : MeshData.MaterialSections)
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Applying %d vertices, %d triangles (%d indices), %d material sections"), 
+        MeshData.Vertices.Num(), MeshData.Triangles.Num() / 3, MeshData.Triangles.Num(), MeshData.MaterialSections.Num());
+    
+    // Log which code path we're taking
+    UE_LOG(LogHearthshireVoxel, Warning, TEXT("ApplyMeshToComponent: NEW CODE - Creating single section to avoid duplicates"));
+    
+    // Configure component for opaque rendering
+    Component->bUseAsyncCooking = true;
+    Component->bUseComplexAsSimpleCollision = false;
+    Component->SetCastShadow(true);
+    Component->bRenderCustomDepth = false;
+    Component->bRenderInMainPass = true;
+    Component->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    Component->SetCollisionResponseToAllChannels(ECR_Block);
+    
+    // Check if we have material sections
+    if (MeshData.MaterialSections.Num() == 0)
     {
-        EVoxelMaterial VoxelMaterial = MaterialSection.Key;
-        int32 SectionIndex = MaterialSection.Value;
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("ApplyMeshToComponent: No material sections, creating single section"));
         
-        // Get material
-        UMaterialInterface* Material = nullptr;
-        if (MaterialSet)
+        // Validate vertex colors are opaque
+        TArray<FColor> ValidatedColors = MeshData.VertexColors;
+        for (FColor& Color : ValidatedColors)
         {
-            Material = MaterialSet->GetMaterial(VoxelMaterial);
+            Color.A = 255; // Force full opacity
         }
         
-        // Create mesh section
+        // Create a single mesh section with all data (fallback for basic visibility)
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Creating mesh section 0 with %d triangles"), MeshData.Triangles.Num() / 3);
         Component->CreateMeshSection(
-            SectionIndex,
+            0, // Section index
             MeshData.Vertices,
             MeshData.Triangles,
             MeshData.Normals,
             MeshData.UV0,
-            MeshData.VertexColors,
+            ValidatedColors,
             MeshData.Tangents,
             true // Create collision
         );
         
-        if (Material)
+        // Try to apply a default material if available
+        if (MaterialSet)
         {
-            Component->SetMaterial(SectionIndex, Material);
+            UMaterialInterface* DefaultMaterial = MaterialSet->GetMaterial(EVoxelMaterial::Stone);
+            if (DefaultMaterial)
+            {
+                Component->SetMaterial(0, DefaultMaterial);
+                UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Applied default stone material"));
+            }
+            else
+            {
+                UE_LOG(LogHearthshireVoxel, Warning, TEXT("ApplyMeshToComponent: No default material found"));
+            }
         }
     }
+    else
+    {
+        // Create a single mesh section if we have multiple materials
+        // The material sections map indicates which materials are present but we'll use a single section
+        // to avoid duplicate geometry issues
+        
+        // Validate vertex colors are opaque
+        TArray<FColor> ValidatedColors = MeshData.VertexColors;
+        for (FColor& Color : ValidatedColors)
+        {
+            Color.A = 255; // Force full opacity
+        }
+        
+        // Create a single mesh section with all geometry
+        UE_LOG(LogHearthshireVoxel, Warning, TEXT("Creating mesh section 0 with materials, %d triangles"), MeshData.Triangles.Num() / 3);
+        Component->CreateMeshSection(
+            0, // Single section index
+            MeshData.Vertices,
+            MeshData.Triangles,
+            MeshData.Normals,
+            MeshData.UV0,
+            ValidatedColors,
+            MeshData.Tangents,
+            true // Create collision
+        );
+        
+        // Apply the most common material or default
+        if (MaterialSet && MeshData.MaterialSections.Num() > 0)
+        {
+            // Get the first material (we'll improve this later with proper per-face materials)
+            EVoxelMaterial FirstMaterial = MeshData.MaterialSections.begin().Key();
+            UMaterialInterface* Material = MaterialSet->GetMaterial(FirstMaterial);
+            
+            if (Material)
+            {
+                Component->SetMaterial(0, Material);
+                UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Applied material %d to single section"), (int32)FirstMaterial);
+            }
+        }
+        
+        UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Created single mesh section to avoid duplicate geometry"));
+    }
     
-    Component->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+    // Update bounds and mark render state dirty
+    Component->UpdateBounds();
+    Component->MarkRenderStateDirty();
+    
+    UE_LOG(LogHearthshireVoxel, Log, TEXT("ApplyMeshToComponent: Mesh application completed"));
 }
 
 void FVoxelMeshGenerator::AddFace(
@@ -214,21 +305,25 @@ void FVoxelMeshGenerator::AddQuad(
     
     FProcMeshTangent ProcTangent(Tangent, false);
     
-    // Add vertices
+    // Add vertices with fully opaque white color
     int32 StartIndex = MeshData.Vertices.Num();
+    FColor OpaqueWhite(255, 255, 255, 255); // Ensure full opacity
     
-    AddVertex(MeshData, V0, Normal, UV0, ProcTangent);
-    AddVertex(MeshData, V1, Normal, UV1, ProcTangent);
-    AddVertex(MeshData, V2, Normal, UV2, ProcTangent);
-    AddVertex(MeshData, V3, Normal, UV3, ProcTangent);
+    AddVertex(MeshData, V0, Normal, UV0, ProcTangent, OpaqueWhite);
+    AddVertex(MeshData, V1, Normal, UV1, ProcTangent, OpaqueWhite);
+    AddVertex(MeshData, V2, Normal, UV2, ProcTangent, OpaqueWhite);
+    AddVertex(MeshData, V3, Normal, UV3, ProcTangent, OpaqueWhite);
     
-    // Add triangles (two triangles per quad)
+    // Add triangles (two triangles per quad) with correct winding order
+    // UE5 uses clockwise winding for front faces when viewed from outside
     int32 SectionIndex = GetOrCreateMaterialSection(MeshData, Material);
     
+    // First triangle: V0, V1, V2 (clockwise when viewed from outside)
     MeshData.Triangles.Add(StartIndex + 0);
     MeshData.Triangles.Add(StartIndex + 1);
     MeshData.Triangles.Add(StartIndex + 2);
     
+    // Second triangle: V0, V2, V3 (clockwise when viewed from outside)
     MeshData.Triangles.Add(StartIndex + 0);
     MeshData.Triangles.Add(StartIndex + 2);
     MeshData.Triangles.Add(StartIndex + 3);
@@ -256,10 +351,33 @@ bool FVoxelMeshGenerator::IsFaceVisible(
     int32 X, int32 Y, int32 Z,
     EVoxelFace Face)
 {
-    FVoxel Neighbor = GetNeighborVoxel(ChunkData, X, Y, Z, Face);
+    // First check if the current voxel is solid
+    FVoxel CurrentVoxel = ChunkData.GetVoxel(X, Y, Z);
+    if (CurrentVoxel.IsAir())
+    {
+        return false; // Air voxels don't generate faces
+    }
     
-    // Face is visible if neighbor is air or transparent
-    return Neighbor.IsAir() || (Neighbor.IsTransparent() && ChunkData.GetVoxel(X, Y, Z).Material != Neighbor.Material);
+    // Get the direction offset for this face
+    FIntVector Direction = GetFaceDirection(Face);
+    int32 NeighborX = X + Direction.X;
+    int32 NeighborY = Y + Direction.Y;
+    int32 NeighborZ = Z + Direction.Z;
+    
+    // Check if neighbor is out of bounds - if so, face is visible
+    if (NeighborX < 0 || NeighborX >= ChunkData.ChunkSize.X ||
+        NeighborY < 0 || NeighborY >= ChunkData.ChunkSize.Y ||
+        NeighborZ < 0 || NeighborZ >= ChunkData.ChunkSize.Z)
+    {
+        return true; // Face is at chunk boundary, so it's visible
+    }
+    
+    // Get the neighbor voxel
+    FVoxel Neighbor = ChunkData.GetVoxel(NeighborX, NeighborY, NeighborZ);
+    
+    // Face is visible if neighbor is air or transparent with different material
+    return Neighbor.IsAir() || 
+           (Neighbor.IsTransparent() && CurrentVoxel.Material != Neighbor.Material);
 }
 
 FVoxel FVoxelMeshGenerator::GetNeighborVoxel(
@@ -303,44 +421,47 @@ void FVoxelMeshGenerator::GetFaceVertices(EVoxelFace Face, const FVector& Positi
 {
     const float S = Size;
     
+    // IMPORTANT: Vertices must be ordered clockwise when viewed from outside the cube
+    // This ensures proper face culling and lighting in UE5
+    
     switch (Face)
     {
-        case EVoxelFace::Front: // +Y
+        case EVoxelFace::Front: // +Y (facing positive Y)
             OutVertices[0] = Position + FVector(0, S, 0);
             OutVertices[1] = Position + FVector(S, S, 0);
             OutVertices[2] = Position + FVector(S, S, S);
             OutVertices[3] = Position + FVector(0, S, S);
             break;
             
-        case EVoxelFace::Back: // -Y
+        case EVoxelFace::Back: // -Y (facing negative Y)
             OutVertices[0] = Position + FVector(S, 0, 0);
             OutVertices[1] = Position + FVector(0, 0, 0);
             OutVertices[2] = Position + FVector(0, 0, S);
             OutVertices[3] = Position + FVector(S, 0, S);
             break;
             
-        case EVoxelFace::Right: // +X
+        case EVoxelFace::Right: // +X (facing positive X)
             OutVertices[0] = Position + FVector(S, S, 0);
             OutVertices[1] = Position + FVector(S, 0, 0);
             OutVertices[2] = Position + FVector(S, 0, S);
             OutVertices[3] = Position + FVector(S, S, S);
             break;
             
-        case EVoxelFace::Left: // -X
+        case EVoxelFace::Left: // -X (facing negative X)
             OutVertices[0] = Position + FVector(0, 0, 0);
             OutVertices[1] = Position + FVector(0, S, 0);
             OutVertices[2] = Position + FVector(0, S, S);
             OutVertices[3] = Position + FVector(0, 0, S);
             break;
             
-        case EVoxelFace::Top: // +Z
+        case EVoxelFace::Top: // +Z (facing positive Z - up)
             OutVertices[0] = Position + FVector(0, 0, S);
             OutVertices[1] = Position + FVector(S, 0, S);
             OutVertices[2] = Position + FVector(S, S, S);
             OutVertices[3] = Position + FVector(0, S, S);
             break;
             
-        case EVoxelFace::Bottom: // -Z
+        case EVoxelFace::Bottom: // -Z (facing negative Z - down)
             OutVertices[0] = Position + FVector(0, S, 0);
             OutVertices[1] = Position + FVector(S, S, 0);
             OutVertices[2] = Position + FVector(S, 0, 0);
